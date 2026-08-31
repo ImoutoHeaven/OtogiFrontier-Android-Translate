@@ -1,0 +1,13 @@
+/diagnostics/
+/e2e/
+/evidence/
+/font-debug/
+/input/
+/keys/
+/out/
+/payload/assets/copyToData/Assets/font
+*.apk
+*.jks
+*.keystore
+*.jsonl
+*.log
