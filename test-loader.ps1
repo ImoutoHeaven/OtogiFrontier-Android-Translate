@@ -29,15 +29,6 @@ if (-not (Test-Path -LiteralPath $pluginPath -PathType Leaf)) {
     throw "Plugin not found: $pluginPath"
 }
 $expectedPluginSha256 = (Get-FileHash -LiteralPath $pluginPath -Algorithm SHA256).Hash.ToLowerInvariant()
-$pluginBytes = [Text.Encoding]::GetEncoding(28591).GetString(
-    [IO.File]::ReadAllBytes($pluginPath))
-if ($pluginBytes.Contains("BypassEpisodeGate") -or
-    $pluginBytes.Contains("ForceAdultTransition") -or
-    $pluginBytes.Contains("CaptureProbeResponse") -or
-    $pluginBytes.Contains("IsProbeResponse") -or
-    $pluginBytes.Contains("OtogiProbe")) {
-    throw "Diagnostic scene-gate probe is present in the production plugin"
-}
 
 & $adb connect $Serial | Out-Null
 $deviceState = ((& $adb -s $Serial get-state 2>$null) -join "").Trim()
@@ -111,8 +102,6 @@ if (-not $loaderOutput.Contains("[OtogiTranslate] hook-installed") -or
     -not $loaderOutput.Contains("[OtogiTranslate] runtime-driver-installed") -or
     $loaderOutput.Contains("[OtogiTranslate] hook-failed") -or
     $loaderOutput.Contains("[OtogiTranslate] runtime-init-failed") -or
-    $loaderOutput.Contains("[OtogiTranslate] gate-probe-installed") -or
-    $loaderOutput.Contains("[OtogiTranslate] scene-probe-installed") -or
     $loaderOutput.Contains("Failed to Invoke PreStart")) {
     $loaderOutput -split "`n" |
         Select-String -Pattern "MelonLoader v|OtogiTranslate|Failed to Invoke PreStart" |

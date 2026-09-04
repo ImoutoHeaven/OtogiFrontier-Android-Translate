@@ -22,19 +22,6 @@ $pluginPath = Join-Path $PSScriptRoot "out/OtogiTranslate.dll"
 if (-not (Test-Path -LiteralPath $pluginPath -PathType Leaf)) {
     throw "Plugin not found: $pluginPath"
 }
-$probeMethods = @(
-    "BypassEpisodeGate",
-    "ForceAdultTransition",
-    "CaptureProbeResponse",
-    "IsProbeResponse",
-    "OtogiProbe"
-)
-$pluginBytes = [Text.Encoding]::GetEncoding(28591).GetString(
-    [IO.File]::ReadAllBytes($pluginPath))
-$foundProbeMethods = @($probeMethods | Where-Object { $pluginBytes.Contains($_) })
-if ($foundProbeMethods.Count -ne 0) {
-    throw "Production plugin contains scene-gate probe methods"
-}
 $expectedPluginSha256 = (Get-FileHash -LiteralPath $pluginPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $files = "/sdcard/Android/data/$PackageName/files"
 $log = "$files/melonloader/etc/Latest.log"
@@ -154,16 +141,10 @@ function Assert-CleanLog([string]$Text) {
         "[OtogiTranslate] dictionary-quarantine-failed",
         "[OtogiTranslate] adult-dictionary-mapping-missing",
         "[OtogiTranslate] ui-scan-error",
-        "[OtogiTranslate] llm-error",
-        "[OtogiTranslate] gate-probe",
-        "[OtogiTranslate] gate-bypass",
-        "[OtogiTranslate] scene-probe",
-        "[OtogiTranslate] probe-response",
-        "[OtogiTranslate] probe-capture-error",
-        "[OtogiTranslate] http-request"
+        "[OtogiTranslate] llm-error"
     ) | Where-Object { $Text.Contains($_) })
     if ($failures.Count -ne 0) {
-        throw "Plugin error/probe marker found: $($failures -join ', ')"
+        throw "Plugin error marker found: $($failures -join ', ')"
     }
 }
 
@@ -175,7 +156,7 @@ if ((Invoke-AdbCommand -Arguments @("get-state")).Trim() -ne "device") {
 
 $runtimePluginSha256 = ((Invoke-AdbShell "sha256sum '$files/Plugins/OtogiTranslate.dll'") -split "\s+")[0].ToLowerInvariant()
 if ($runtimePluginSha256 -ne $expectedPluginSha256) {
-    throw "Installed plugin does not match the probe-free production DLL"
+    throw "Installed plugin does not match the local production DLL"
 }
 $config = Invoke-AdbShell "cat '$files/OtogiTranslate.cfg'"
 $llmConfig = Read-IniSection $config "LLM"
@@ -309,7 +290,7 @@ finally {
 
 if ($passed) {
     Set-Content -LiteralPath (Join-Path $evidence "PASS.txt") -Encoding utf8 -Value @(
-        "PASS production probe exclusion",
+        "PASS production plugin hash",
         "PASS SurfaceFlinger game-layer frame rate >=58 FPS",
         "PASS replacement font hash",
         "PASS live LLM request and UI text application",

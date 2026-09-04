@@ -344,21 +344,6 @@ namespace OtogiTranslate
             IntPtr argument4,
             IntPtr methodInfo);
 
-#if SCENE_GATE_PROBE
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate void EpisodeSetupCell(
-            IntPtr instance,
-            IntPtr episodeViewModel,
-            IntPtr methodInfo);
-
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate IntPtr CharacterStoryTransition(
-            IntPtr instance,
-            int isAdult,
-            IntPtr episodeViewModel,
-            IntPtr methodInfo);
-#endif
-
         private static readonly object CacheLock = new object();
         private static readonly Dictionary<string, Dictionary<string, string>> Cache =
             new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
@@ -410,14 +395,6 @@ namespace OtogiTranslate
         private static HttpRequestConstructor _originalRequestConstructor;
         private static HttpRequestConstructor _requestConstructorDetour;
         private static IntPtr _requestConstructorTargetSlot;
-#if SCENE_GATE_PROBE
-        private static EpisodeSetupCell _originalEpisodeSetupCell;
-        private static EpisodeSetupCell _episodeSetupCellDetour;
-        private static IntPtr _episodeSetupCellTargetSlot;
-        private static CharacterStoryTransition _originalSceneTransition;
-        private static CharacterStoryTransition _sceneTransitionDetour;
-        private static IntPtr _sceneTransitionTargetSlot;
-#endif
         private static IntPtr _uriClass;
         private static IntPtr _uriConstructor;
         private static IntPtr _tmpFindObjects;
@@ -452,13 +429,6 @@ namespace OtogiTranslate
         private static int _mosaicErrorLogged;
         private static int _fontRedirectLogged;
         private static int _fontRedirectErrorLogged;
-#if SCENE_GATE_PROBE
-        private static int _requestTraceCount;
-        private static int _gateBypassLogged;
-        private static int _adultTransitionLogged;
-        private static int _probeResponseCount;
-        private static int _probeCaptureErrorLogged;
-#endif
         private static int _tmpScanHitLogged;
         private static int _tmpScanErrorLogged;
         private static int _dictionaryPrefetchErrorLogged;
@@ -697,87 +667,6 @@ namespace OtogiTranslate
                     MelonLogger.Error(
                         "[OtogiTranslate] font-redirect-failed: " + exception.Message);
                 }
-
-#if SCENE_GATE_PROBE
-                try
-                {
-                    var gameAssembly = assemblyOpen(domainGet(), "Assembly-CSharp");
-                    var gameImage = gameAssembly == IntPtr.Zero
-                        ? IntPtr.Zero
-                        : assemblyGetImage(gameAssembly);
-                    var cellClass = gameImage == IntPtr.Zero
-                        ? IntPtr.Zero
-                        : classFromName(gameImage, "Otogi", "EpisodeScenarioCell");
-                    var setupCellMethod = cellClass == IntPtr.Zero
-                        ? IntPtr.Zero
-                        : _classGetMethod(cellClass, "SetupCell", 1);
-                    var setupCellTarget = setupCellMethod == IntPtr.Zero
-                        ? IntPtr.Zero
-                        : Marshal.ReadIntPtr(setupCellMethod);
-                    if (setupCellTarget == IntPtr.Zero)
-                        throw new InvalidOperationException(
-                            "EpisodeScenarioCell.SetupCell native pointer was not found");
-
-                    _episodeSetupCellDetour = BypassEpisodeGate;
-                    _episodeSetupCellTargetSlot = Marshal.AllocHGlobal(IntPtr.Size);
-                    Marshal.WriteIntPtr(_episodeSetupCellTargetSlot, setupCellTarget);
-                    MelonUtils.NativeHookAttach(
-                        _episodeSetupCellTargetSlot,
-                        Marshal.GetFunctionPointerForDelegate(
-                            _episodeSetupCellDetour));
-                    _originalEpisodeSetupCell = (EpisodeSetupCell)
-                        Marshal.GetDelegateForFunctionPointer(
-                            Marshal.ReadIntPtr(_episodeSetupCellTargetSlot),
-                            typeof(EpisodeSetupCell));
-                    MelonLogger.Msg(
-                        "[OtogiTranslate] gate-probe-installed viewable=1");
-                }
-                catch (Exception exception)
-                {
-                    MelonLogger.Error(
-                        "[OtogiTranslate] gate-probe-failed: " + exception.Message);
-                }
-
-                try
-                {
-                    var gameAssembly = assemblyOpen(domainGet(), "Assembly-CSharp");
-                    var gameImage = gameAssembly == IntPtr.Zero
-                        ? IntPtr.Zero
-                        : assemblyGetImage(gameAssembly);
-                    var sceneClass = gameImage == IntPtr.Zero
-                        ? IntPtr.Zero
-                        : classFromName(gameImage, "Otogi", "CharacterStoryScene");
-                    var transitionMethod = sceneClass == IntPtr.Zero
-                        ? IntPtr.Zero
-                        : _classGetMethod(
-                            sceneClass, "SceneTransitionAsObservable", 2);
-                    var transitionTarget = transitionMethod == IntPtr.Zero
-                        ? IntPtr.Zero
-                        : Marshal.ReadIntPtr(transitionMethod);
-                    if (transitionTarget == IntPtr.Zero)
-                        throw new InvalidOperationException(
-                            "CharacterStoryScene.SceneTransitionAsObservable native pointer was not found");
-
-                    _sceneTransitionDetour = ForceAdultTransition;
-                    _sceneTransitionTargetSlot = Marshal.AllocHGlobal(IntPtr.Size);
-                    Marshal.WriteIntPtr(_sceneTransitionTargetSlot, transitionTarget);
-                    MelonUtils.NativeHookAttach(
-                        _sceneTransitionTargetSlot,
-                        Marshal.GetFunctionPointerForDelegate(
-                            _sceneTransitionDetour));
-                    _originalSceneTransition = (CharacterStoryTransition)
-                        Marshal.GetDelegateForFunctionPointer(
-                            Marshal.ReadIntPtr(_sceneTransitionTargetSlot),
-                            typeof(CharacterStoryTransition));
-                    MelonLogger.Msg(
-                        "[OtogiTranslate] scene-probe-installed forceAdult=1");
-                }
-                catch (Exception exception)
-                {
-                    MelonLogger.Error(
-                        "[OtogiTranslate] scene-probe-failed: " + exception.Message);
-                }
-#endif
 
                 try
                 {
@@ -1473,10 +1362,6 @@ namespace OtogiTranslate
                     if (Interlocked.Exchange(ref _fontRedirectLogged, 1) == 0)
                         MelonLogger.Msg("[OtogiTranslate] font-redirected");
                 }
-#if SCENE_GATE_PROBE
-                if (IsTraceRequest(requestUrl))
-                    LogRequest(requestUrl);
-#endif
             }
             catch (Exception exception)
             {
@@ -1493,39 +1378,6 @@ namespace OtogiTranslate
                 argument4,
                 methodInfo);
         }
-
-#if SCENE_GATE_PROBE
-        private static bool IsTraceRequest(string url)
-        {
-            if (string.IsNullOrEmpty(url))
-                return false;
-            return url.IndexOf("/api/", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                url.IndexOf("/Assets/", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                url.IndexOf("/asset", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                url.IndexOf(".bundle", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                url.IndexOf(".unity3d", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                url.IndexOf("/chara/", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                url.IndexOf("/scene/", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                url.IndexOf("/sound/", StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
-        private static void LogRequest(string url)
-        {
-            var number = Interlocked.Increment(ref _requestTraceCount);
-            if (number > 2048)
-                return;
-            Uri parsed;
-            var shown = Uri.TryCreate(url, UriKind.Absolute, out parsed)
-                ? parsed.GetLeftPart(UriPartial.Path) + parsed.Query
-                : url;
-            MelonLogger.Msg(string.Format(
-                CultureInfo.InvariantCulture,
-                "[OtogiTranslate] http-request n={0} url={1}",
-                number,
-                shown));
-        }
-
-#endif
 
         private static void ScanTmpText()
         {
@@ -1595,9 +1447,6 @@ namespace OtogiTranslate
             try
             {
                 var responseUrl = GetResponseUrl(instance);
-#if SCENE_GATE_PROBE
-                CaptureProbeResponse(instance, responseUrl, result);
-#endif
                 var originalJson = ToManagedString(result);
                 QueueEpisodeDictionaries(responseUrl, originalJson);
                 string type;
@@ -1654,107 +1503,6 @@ namespace OtogiTranslate
             var absoluteUri = Invoke(FindMethod(_objectGetClass(uri), "get_AbsoluteUri"), uri);
             return ToManagedString(absoluteUri);
         }
-
-#if SCENE_GATE_PROBE
-        private static void BypassEpisodeGate(
-            IntPtr instance,
-            IntPtr episodeViewModel,
-            IntPtr methodInfo)
-        {
-            if (episodeViewModel != IntPtr.Zero)
-            {
-                var wasViewable = Marshal.ReadByte(episodeViewModel, 0x35);
-                Marshal.WriteByte(episodeViewModel, 0x35, 1);
-                if (wasViewable == 0 &&
-                    Interlocked.Increment(ref _gateBypassLogged) <= 256)
-                {
-                    MelonLogger.Msg(string.Format(
-                        CultureInfo.InvariantCulture,
-                        "[OtogiTranslate] gate-bypass flow={0} unlockType={1}",
-                        Marshal.ReadInt32(episodeViewModel, 0x10),
-                        Marshal.ReadInt32(episodeViewModel, 0x38)));
-                }
-            }
-            _originalEpisodeSetupCell(instance, episodeViewModel, methodInfo);
-        }
-
-        private static IntPtr ForceAdultTransition(
-            IntPtr instance,
-            int isAdult,
-            IntPtr episodeViewModel,
-            IntPtr methodInfo)
-        {
-            if (isAdult == 0 && episodeViewModel != IntPtr.Zero &&
-                Interlocked.Increment(ref _adultTransitionLogged) <= 256)
-            {
-                MelonLogger.Msg(string.Format(
-                    CultureInfo.InvariantCulture,
-                    "[OtogiTranslate] scene-probe flow={0} forceAdult=1",
-                    Marshal.ReadInt32(episodeViewModel, 0x10)));
-            }
-            return _originalSceneTransition(instance, 1, episodeViewModel, methodInfo);
-        }
-
-        private static bool IsProbeResponse(string url)
-        {
-            if (string.IsNullOrEmpty(url))
-                return false;
-            return url.IndexOf("/api/Episode/CharacterStory", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                url.IndexOf("/api/episode/monsters/", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                url.IndexOf("/api/episode/spirits/", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                url.IndexOf("/api/MSceneAdultFlow/SendGift/", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                url.IndexOf("/api/MAdults/NextAdultScene/", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                url.IndexOf("/api/MAdults/MonsterMAdults/", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                url.IndexOf("/api/MScenes/", StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
-        private static void CaptureProbeResponse(
-            IntPtr response,
-            string url,
-            IntPtr result)
-        {
-            if (!IsProbeResponse(url))
-                return;
-
-            var number = Interlocked.Increment(ref _probeResponseCount);
-            if (number > 512)
-                return;
-
-            try
-            {
-                var body = result == IntPtr.Zero ? string.Empty : ToManagedString(result);
-                var record = new JObject();
-                record["url"] = url;
-                record["statusCode"] = Marshal.ReadInt32(response, 0x18);
-                record["body"] = body ?? string.Empty;
-                var directory = Path.Combine(
-                    MelonUtils.GetApplicationPath(),
-                    "UserData", "OtogiProbe", "responses");
-                Directory.CreateDirectory(directory);
-                var path = Path.Combine(
-                    directory,
-                    number.ToString("D4", CultureInfo.InvariantCulture) + ".json");
-                File.WriteAllText(
-                    path,
-                    record.ToString(Formatting.None),
-                    new UTF8Encoding(false));
-                MelonLogger.Msg(string.Format(
-                    CultureInfo.InvariantCulture,
-                    "[OtogiTranslate] probe-response n={0} status={1} path={2} chars={3}",
-                    number,
-                    Marshal.ReadInt32(response, 0x18),
-                    new Uri(url).AbsolutePath,
-                    body == null ? 0 : body.Length));
-            }
-            catch (Exception exception)
-            {
-                if (Interlocked.Exchange(ref _probeCaptureErrorLogged, 1) == 0)
-                    MelonLogger.Warning(
-                        "[OtogiTranslate] probe-capture-error: " + exception.Message);
-            }
-        }
-
-#endif
 
         private static bool TryGetTranslationKey(
             string url,

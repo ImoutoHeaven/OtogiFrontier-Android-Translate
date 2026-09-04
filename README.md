@@ -1,34 +1,36 @@
 # Otogi Frontier Android Patcher
 
-将 DMM 版《オトギフロンティア》官方 APK 构建为可与官方版共存的
-LemonLoader 版本。构建、签名和校验全部在 Docker 中完成；官方 APK、账号数据、
-签名密钥和 LLM 凭据不进入仓库。
-
-默认输出包名：`jp.co.dmm.dmmgames.kms.prototype`。
+将 DMM 版《オトギフロンティア》单体 ARM64 APK 构建为可与官方版共存的
+LemonLoader 安装包。目标包名为 `jp.co.dmm.dmmgames.kms.prototype`；编译、修补、
+签名和产物校验均在 Docker 中完成。
 
 ## 功能
 
-- 从 [`alex343425/otogitranslate`](https://github.com/alex343425/otogitranslate)
-  加载角色剧情翻译，也支持设备上的本地词典。
-- 将游戏目标帧率固定为 60 FPS。
-- 移除 Spine `SkeletonMosaic` 材质动态添加的马赛克。
-- 使用统一的简体中文字体，避免同一句文字出现不同字形。
-- 可选扫描 `TMPro.TMP_Text` 和 `UnityEngine.UI.Text`，通过兼容
-  OpenAI Chat Completions 的接口翻译日文 UI。
+- 使用 [`alex343425/otogitranslate`](https://github.com/alex343425/otogitranslate)
+  的简体中文词典转换角色、成人、世界和支线剧情响应。
+- 通过 OpenAI Chat Completions 兼容接口翻译运行时日文 UI 文本。
+- 将 Unity 目标帧率固定为 60 FPS。
+- 将 Spine `SkeletonMosaic` 材质的 `_BlockSize` 设为 `0.001`。
+- 将游戏字体请求重定向到 Noto Sans CJK SC，并随 APK 预置同一字体。
 
-## 要求
+剧情与 UI 翻译仅处理游戏已经返回的内容。场景可见性、角色持有状态、好感度和账号权限
+继续由游戏及其服务端处理。
 
-- Windows 10/11 与 PowerShell 7（`pwsh`）。
-- 可用的 Docker daemon。
-- DMM GAMES STORE 安装或提供的官方 DMM 版 APK。
-- 运行安装检查时需要 `adb` 和一台支持 ARM64 native bridge 的 Android 模拟器。
+## 环境
 
-工作流只接受包名 `jp.co.dmm.dmmgames.kms`、受信任签名且包含
-`lib/arm64-v8a/libil2cpp.so` 的单体 APK。Split APK 和 Google Play 版不受支持。
+- Windows 10/11
+- PowerShell 7（`pwsh`）
+- 可用的 Docker daemon
+- 安装检查所需的 `adb`
+- 支持 ARM64 native bridge 的 Android 模拟器
+- 包名为 `jp.co.dmm.dmmgames.kms`、签名匹配项目内固定摘要且包含
+  `lib/arm64-v8a/libil2cpp.so` 的 DMM 单体 APK
 
-## 一键更新
+默认 ADB serial 为 `127.0.0.1:5555`。`-Serial` 可选择其他设备。
 
-先在模拟器的 DMM GAMES STORE 中更新官方版，再运行：
+## 构建、安装和检查
+
+在模拟器的 DMM GAMES STORE 中更新官方版。首次构建运行：
 
 ```powershell
 pwsh -NoProfile -NonInteractive -File ./release.ps1 `
@@ -36,23 +38,18 @@ pwsh -NoProfile -NonInteractive -File ./release.ps1 `
   -CreateKey
 ```
 
-`release.ps1` 会：
-
-1. 从已连接设备提取官方 APK；
-2. 校验包名、官方签名和 APK 完整性；
-3. 构建并签名 `.prototype` 安装包；
-4. 覆盖安装到模拟器；
-5. 刷新插件和字体文件；
-6. 检查 LemonLoader、翻译钩子、60 FPS、去马赛克和字体钩子。
-
-`-CreateKey` 只用于第一次构建。之后运行同一命令但去掉该参数：
+后续更新复用 `keys/otogi-dev.keystore`：
 
 ```powershell
 pwsh -NoProfile -NonInteractive -File ./release.ps1 `
   -AdbPath "C:\Android\platform-tools\adb.exe"
 ```
 
-如果已经有官方 APK，可跳过设备提取：
+`release.ps1` 从设备提取官方 APK，调用 Docker 构建并签名安装包，覆盖安装 prototype
+包，刷新插件和字体，再执行运行时 smoke test。成功以
+`PASS source verification, build, install, and runtime smoke test` 结束。
+
+已有官方 APK 时可直接指定输入：
 
 ```powershell
 pwsh -NoProfile -NonInteractive -File ./release.ps1 `
@@ -60,11 +57,7 @@ pwsh -NoProfile -NonInteractive -File ./release.ps1 `
   -InputApk "D:\Downloads\Original.apk"
 ```
 
-默认 ADB serial 是 `127.0.0.1:5555`；需要时使用 `-Serial` 修改。
-
-## 只构建
-
-不安装到设备：
+只生成产物时运行：
 
 ```powershell
 pwsh -NoProfile -NonInteractive -File ./run.ps1 `
@@ -72,55 +65,61 @@ pwsh -NoProfile -NonInteractive -File ./run.ps1 `
   -CreateKey
 ```
 
-产物位于 `out/`：
+`run.ps1` 使用临时 `docker run --rm` 容器。输入和 payload 以只读方式挂载，输出仅写入
+`out/`，签名密钥仅写入 `keys/`。
 
-- `Original.prototype-signed.apk`
-- `Original.prototype-signed.apk.sha256`
-- `Original.prototype-signed.apk.build-info.txt`
-- `OtogiTranslate.dll`
-
-签名密钥位于 `keys/otogi-dev.keystore`。请备份它；同一包名只有使用同一密钥签名
-才能覆盖安装。源 APK、输出 APK、密钥、日志、缓存和测试证据均已被 Git 忽略。
-
-## 剧情翻译
-
-插件处理以下响应：
+### 产物
 
 ```text
-api/MAdults/MonsterMAdults/{MAdultId} -> MAdults/{mapped MSceneId}_gb.json
-api/MScenes/{id}                       -> MScenes/{id}_gb.json
-api/Episode/MStory/{id}                -> Mstory/{id}_gb.json
+out/Original.prototype-signed.apk
+out/Original.prototype-signed.apk.sha256
+out/Original.prototype-signed.apk.build-info.txt
+out/OtogiTranslate.dll
 ```
 
-本地词典路径：
+同一 prototype 包使用同一密钥才能覆盖安装。请备份
+`keys/otogi-dev.keystore`。`input/`、`keys/`、`out/`、`e2e/`、APK、日志和运行时缓存均由
+`.gitignore` 排除。
+
+## 剧情词典
+
+响应与词典的对应关系为：
+
+```text
+api/MScenes/{MSceneId}                    -> MScenes/{MSceneId}_gb.json
+api/MAdults/MonsterMAdults/{MAdultId}     -> MAdults/{mapped MSceneId}_gb.json
+api/Episode/MStory/{MStoryId}             -> Mstory/{MStoryId}_gb.json
+```
+
+设备词典位于：
 
 ```text
 /sdcard/Android/data/<package>/files/UserData/OtogiTranslate/<type>/<id>_gb.json
 ```
 
-插件优先读取本地词典。角色、世界和支线列表会通过 IL2CPP
-`UnityWebRequest` 异步预取缺少的词典并写入本地路径；临时网络错误最多尝试三次，
-HTTP 404 在本次进程中记为不可用。成人词典沿用翻译仓库的普通剧情 `MSceneId`
-文件名，插件使用角色列表中的 `MAdultId` → `MSceneId` 对应关系加载它；映射尚未建立
-时保留成人响应原文。无效的本地词典成功隔离为 `.invalid` 后，远端副本进入下载队列；
-隔离错误会写入日志并保留原文件。
-词典尚未就绪、下载失败或响应处理异常时，游戏继续使用原始响应。
+本地有效词典优先。插件从角色、世界和支线列表预取缺少的词典，并通过 IL2CPP
+`UnityWebRequest` 写入设备目录。传输错误、HTTP 408、429 和 5xx 最多尝试三次；HTTP
+404 在当前进程内标记为不可用。无效本地文件成功移动为 `.invalid` 后进入远端下载队列。
+词典仍在下载、下载失败或响应处理失败时，原始游戏响应直接进入后续流程。
+
+成人 API 使用 `MAdultId`，翻译仓库使用普通剧情的 `MSceneId`。插件从角色剧情列表建立
+`MAdultId -> MSceneId` 映射；映射就绪后加载成人词典，映射待建立时保留原始成人响应。
 
 ## LLM UI 翻译
 
-首次启动会创建：
+首次启动在设备创建：
 
 ```text
 /sdcard/Android/data/<package>/files/OtogiTranslate.cfg
 ```
 
-默认关闭。编辑后重启游戏：
+生成的配置为：
 
 ```ini
 [LLM]
-Enable = true
-Endpoint = https://example.test/v1/chat/completions
-Model = example-model
+Enable = false
+Endpoint = http://10.0.2.2:11434/v1/chat/completions
+Model = qwen2.5:7b
 ApiKey =
 TimeoutSeconds = 30
 RetryCount = 2
@@ -132,33 +131,39 @@ ScanIntervalSeconds = 0.5
 LogSeenText = false
 ```
 
-接口必须使用 HTTPS；仅 loopback 和 Android Emulator 的 `10.0.2.2` 允许 HTTP。
-`ApiKey` 以明文保存在设备的包专属目录中，不会写入插件日志，请勿提交或分享该
-配置文件。
+启用 LLM 时设置 `Enable = true`，填写 `Endpoint`、`Model` 和接口所需的 `ApiKey`，再重启
+游戏。远程接口使用 HTTPS；loopback 与 Android Emulator 宿主地址 `10.0.2.2` 也可使用 HTTP。`ApiKey` 以明文保存在应用专属目录中，提交与共享范围应排除
+该配置文件。
 
-扫描器只把含平假名或片假名的文本加入队列。纯汉字保持不变，避免已经翻译的中文
-再次入队。翻译缓存写入同目录下的 `OtogiTranslate.cache.jsonl`。富文本标签、转义
-序列、实际换行和占位符保持一致时接受响应；其余文本保留原文并进入本次进程的跳过
-集合。`RetryCount` 表示首次请求之外的重试次数，可设为 `0` 到 `5`；408、429、5xx
-和传输错误使用退避，其他 4xx 会暂停本次进程的 LLM 请求。图片、Sprite 和 Texture
-中烘焙的文字由原始资源提供。
+扫描器处理 `TMPro.TMP_Text` 和 `UnityEngine.UI.Text` 中长度为 1–1000 个字符且包含假名的
+文本。缓存位于同目录的 `OtogiTranslate.cache.jsonl`，最多加载 10000 项。有效响应保留
+富文本标签、转义序列、占位符和换行；其他响应使当前文本在本次进程内继续显示原文。
+`RetryCount` 表示首次请求之外的重试次数，范围为 0–5。408、429、5xx 和传输错误使用
+退避；其他 4xx 暂停当前进程的 LLM 队列。图片、Sprite 和 Texture 中的文字沿用资源
+内容。
 
-## 运行检查
+## 验证
 
-已有构建产物时，运行启动 smoke test：
+### Smoke test
 
 ```powershell
 pwsh -NoProfile -NonInteractive -File ./test-loader.ps1 `
   -AdbPath "C:\Android\platform-tools\adb.exe"
 ```
 
-该检查覆盖安装、生产 DLL 中的 probe 排除、运行时文件哈希和所有 hook 的初始化。
-它会替换 `.prototype` 包的插件、字体和 Loader 日志，并保留登录状态、LLM 配置、
-翻译缓存和官方应用数据。
+该测试安装 `out/` 中的 APK，核对设备插件和字体哈希，并要求 LemonLoader assembly、
+剧情响应、60 FPS、马赛克、字体、词典传输和运行时驱动 hook 完成初始化。登录状态、LLM
+配置、翻译缓存和官方包数据保持原状。
 
-真实游戏 E2E 使用 1920×1080 横屏、已登录且已解锁首个灰姑娘剧情的测试账号。
-设备 `[LLM]` 配置需启用，并提供与测试参数一致的端点、模型和有效 `ApiKey`。调用进程
-通过私有环境变量提供端点和模型：
+### 真实游戏 E2E
+
+E2E 使用以下固定前置条件：
+
+- 1920×1080 横屏模拟器
+- 已登录并已解锁灰姑娘 Flow 1 的测试账号
+- 设备 `[LLM]` 配置启用，且端点、模型和有效 `ApiKey` 与命令参数一致
+- 调用进程通过 `OTOGI_LLM_ENDPOINT` 和 `OTOGI_LLM_MODEL` 提供私有测试参数
+- 当前游戏首页和角色剧情页面布局
 
 ```powershell
 pwsh -NoProfile -NonInteractive -File ./test-e2e.ps1 `
@@ -167,29 +172,38 @@ pwsh -NoProfile -NonInteractive -File ./test-e2e.ps1 `
   -ExpectedModel $env:OTOGI_LLM_MODEL
 ```
 
-E2E 从冷启动进入角色剧情，自远端预取 `MScenes/10001` 和 `MAdults/10001`，再将
-后者应用于 API 成人场景 `210011`。测试要求普通场景至少替换 100 项、成人场景至少
-替换 60 项，并验证 LLM 请求及实际 UI setter、Spine 材质补丁、字体文件哈希以及
-SurfaceFlinger 游戏图层的 60 Hz/60 FPS 状态和至少 58 FPS 的采样均值。截图、Loader
-日志、配置校验结果和帧统计写入已忽略的 `e2e/<timestamp>/`；端点、模型和凭据值保持
-在证据文件之外。测试结束时恢复完整的原有词典目录和 LLM 缓存。
+测试从冷启动进入剧情页面，远端获取 `MScenes/10001` 和 `MAdults/10001`，再将成人词典
+应用到 API 场景 `210011`。通过条件包括：
 
-场景 gate 诊断源由 `SCENE_GATE_PROBE` 编译符号隔离；诊断构建显式启用该符号，
-标准 Docker 构建生成仅含生产功能的 DLL。smoke test 同时拒绝包含 probe 方法名的
-生产 DLL。
+- LLM 请求完成并由实际 UI setter 应用
+- 普通剧情至少替换 100 项
+- 成人剧情至少替换 60 项
+- Spine 马赛克材质补丁实际命中
+- 设备字体哈希匹配 payload
+- SurfaceFlinger 游戏图层为 60 Hz/60 FPS，10 秒采样至少 500 帧且平均帧率至少 58
 
-## 兼容性与分发
+截图、Loader 日志、配置校验结果和帧统计写入 `e2e/<timestamp>/`；端点、模型和凭据值保持
+在证据文件之外。测试完整备份词典目录和 LLM 缓存，并在结束阶段恢复；成功以
+`PASS real game E2E` 结束。
 
-- Loader 固定为 LemonLoader/MelonLoader 0.5.7 ARM64 emulator 版本。
-- 输出 APK 使用本地开发密钥，适合个人安装，不代表官方发行包。
-- 仓库不包含官方 APK、DMM 凭据或完整翻译资源。
-- 不要公开分发官方 APK、构建后的 APK、签名密钥或含 API key 的配置。
-- 游戏、商标和原始资源归其权利人所有；使用者须遵守 DMM 及相关组件条款。
+## 兼容边界
 
-构建会下载固定版本的
-[`LemonLoader/MelonLoader_057`](https://github.com/LemonLoader/MelonLoader_057)、
-[`Apktool`](https://github.com/iBotPeaches/Apktool) 和
-[`MelonLoader.UnityDependencies`](https://github.com/LavaGang/MelonLoader.UnityDependencies)。
-字体 payload 使用 Noto Sans CJK SC，按
-[`LICENSES/OFL-1.1.txt`](LICENSES/OFL-1.1.txt) 提供。除各第三方组件自己的许可外，
-本仓库未附带项目级开源许可证。
+运行验证覆盖 `OtogiTranslate` 的 native IL2CPP hooks。LemonLoader 0.5.7 在该游戏中加载
+`UnityEngine.CoreModule` support module 时会记录 `TypeLoadException`；传统 managed Mods
+仍处于待验证范围。Prototype manifest 包含 `android:debuggable=true` 和
+`MANAGE_EXTERNAL_STORAGE`，适用环境为专用测试设备。
+
+## 组件、数据与许可
+
+构建使用固定版本的：
+
+- [`LemonLoader/MelonLoader_057`](https://github.com/LemonLoader/MelonLoader_057)
+- [`Apktool`](https://github.com/iBotPeaches/Apktool)
+- [`MelonLoader.UnityDependencies`](https://github.com/LavaGang/MelonLoader.UnityDependencies)
+
+Loader payload 面向 ARM64 Android，x86_64 宿主通过模拟器 native bridge 执行。输出包使用
+本地开发密钥，适合个人测试。官方 APK、DMM 账号数据、签名密钥、LLM 凭据和完整翻译
+资源保存在各自的本地或上游位置。公开分发内容应限于有权发布的源码和资源。
+
+字体 payload 为 Noto Sans CJK SC，许可见 [`LICENSES/OFL-1.1.txt`](LICENSES/OFL-1.1.txt)。
+游戏、商标和原始资源归各权利人所有。本仓库除第三方组件许可外未声明项目级开源许可。
