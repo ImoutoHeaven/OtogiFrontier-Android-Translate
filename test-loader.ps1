@@ -29,6 +29,15 @@ if (-not (Test-Path -LiteralPath $pluginPath -PathType Leaf)) {
     throw "Plugin not found: $pluginPath"
 }
 $expectedPluginSha256 = (Get-FileHash -LiteralPath $pluginPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$pluginBytes = [Text.Encoding]::GetEncoding(28591).GetString(
+    [IO.File]::ReadAllBytes($pluginPath))
+if ($pluginBytes.Contains("BypassEpisodeGate") -or
+    $pluginBytes.Contains("ForceAdultTransition") -or
+    $pluginBytes.Contains("CaptureProbeResponse") -or
+    $pluginBytes.Contains("IsProbeResponse") -or
+    $pluginBytes.Contains("OtogiProbe")) {
+    throw "Diagnostic scene-gate probe is present in the production plugin"
+}
 
 & $adb connect $Serial | Out-Null
 $deviceState = ((& $adb -s $Serial get-state 2>$null) -join "").Trim()
@@ -76,14 +85,16 @@ do {
 } until (
     $loaderOutput.Contains("[OtogiTranslate] hook-failed") -or
     $loaderOutput.Contains("Failed to Invoke PreStart") -or
-    $loaderOutput.Contains("[OtogiTranslate] tmp-scan-failed") -or
+    $loaderOutput.Contains("[OtogiTranslate] runtime-init-failed") -or
     ($loaderOutput.Contains("[OtogiTranslate] hook-installed") -and
         $loaderOutput.Contains("Assembly is up to date. No Generation Needed.") -and
         $loaderOutput.Contains("[OtogiTranslate] getter-hit") -and
         $loaderOutput.Contains("[OtogiTranslate] framerate-installed fps=60") -and
         $loaderOutput.Contains("[OtogiTranslate] mosaic-installed") -and
         $loaderOutput.Contains("[OtogiTranslate] font-redirect-installed") -and
-        $loaderOutput.Contains("[OtogiTranslate] config-loaded")) -or
+        $loaderOutput.Contains("[OtogiTranslate] config-loaded") -and
+        $loaderOutput.Contains("[OtogiTranslate] dictionary-transport-installed") -and
+        $loaderOutput.Contains("[OtogiTranslate] runtime-driver-installed")) -or
     (Get-Date) -ge $loadDeadline
 )
 
@@ -96,8 +107,12 @@ if (-not $loaderOutput.Contains("[OtogiTranslate] hook-installed") -or
     -not $loaderOutput.Contains("[OtogiTranslate] mosaic-installed") -or
     -not $loaderOutput.Contains("[OtogiTranslate] font-redirect-installed") -or
     -not $loaderOutput.Contains("[OtogiTranslate] config-loaded") -or
+    -not $loaderOutput.Contains("[OtogiTranslate] dictionary-transport-installed") -or
+    -not $loaderOutput.Contains("[OtogiTranslate] runtime-driver-installed") -or
     $loaderOutput.Contains("[OtogiTranslate] hook-failed") -or
-    $loaderOutput.Contains("[OtogiTranslate] tmp-scan-failed") -or
+    $loaderOutput.Contains("[OtogiTranslate] runtime-init-failed") -or
+    $loaderOutput.Contains("[OtogiTranslate] gate-probe-installed") -or
+    $loaderOutput.Contains("[OtogiTranslate] scene-probe-installed") -or
     $loaderOutput.Contains("Failed to Invoke PreStart")) {
     $loaderOutput -split "`n" |
         Select-String -Pattern "MelonLoader v|OtogiTranslate|Failed to Invoke PreStart" |
@@ -111,4 +126,4 @@ if (-not $appPid) {
     $diagnostic | Select-Object -Last 80 | ForEach-Object { $_.Line }
     throw "App exited after LemonLoader initialization"
 }
-Write-Host "PASS LemonLoader, plugin hooks, font, and runtime assets; pid=$appPid"
+Write-Host "PASS LemonLoader, production plugin hooks, font, and runtime assets; pid=$appPid"

@@ -91,7 +91,7 @@ namespace OtogiTranslate
                     case "llm.retrycount":
                         if (int.TryParse(value, NumberStyles.Integer,
                             CultureInfo.InvariantCulture, out integer))
-                            result.RetryCount = Clamp(integer, 1, 5);
+                            result.RetryCount = Clamp(integer, 0, 5);
                         break;
                     case "llm.requestspersecond":
                         if (int.TryParse(value, NumberStyles.Integer,
@@ -151,7 +151,7 @@ namespace OtogiTranslate
             "Translate Japanese game UI text into Simplified Chinese. Return only the translation. " +
             "Preserve all markup, escape sequences, placeholders, numbers, and line breaks exactly.";
         private static readonly Regex ProtectedToken = new Regex(
-            @"<[^>]+>|\\[nrt]|%[A-Za-z_][A-Za-z0-9_]*|\{\d+(?::[^}]*)?\}",
+            @"<[^>]+>|\\[nrt]|%[A-Za-z_][A-Za-z0-9_]*|\{\d+(?::[^}]*)?\}|\r\n|\r|\n",
             RegexOptions.CultureInvariant);
 
         private readonly object stateLock = new object();
@@ -161,12 +161,15 @@ namespace OtogiTranslate
             new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> pending =
             new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> rejected =
+            new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> logged = new HashSet<string>(StringComparer.Ordinal);
         private readonly Queue<string> queue = new Queue<string>();
         private readonly string cachePath;
         private readonly Action<string> info;
         private readonly Action<string> warning;
         private string lastErrorType;
+        private string lastRejectionType;
 
         internal RuntimeConfig Config { get; private set; }
         internal string ConfigPath { get; private set; }
@@ -201,7 +204,7 @@ namespace OtogiTranslate
             string translated;
             lock (stateLock)
             {
-                if (translatedValues.Contains(source))
+                if (translatedValues.Contains(source) || rejected.Contains(source))
                     return source;
                 if (cache.TryGetValue(source, out translated))
                     return translated;
@@ -255,25 +258,36 @@ namespace OtogiTranslate
 
         internal void Accept(string source, string json)
         {
+            string translated;
             try
             {
-                var translated = ParseResponse(json);
-                if (!string.IsNullOrWhiteSpace(translated) &&
-                    translated.Length <= MaxTranslationLength &&
-                    !string.Equals(source, translated, StringComparison.Ordinal) &&
-                    HasSameProtectedTokens(source, translated))
-                {
-                    Store(source, translated.Trim());
-                    lastErrorType = null;
-                }
-                else
-                {
-                    WarnOnce("invalid-response");
-                }
+                translated = ParseResponse(json);
             }
             catch (Exception exception)
             {
-                WarnOnce(DescribeException(exception));
+                Reject(source, DescribeException(exception));
+                Complete(source);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(translated) ||
+                translated.Length > MaxTranslationLength ||
+                string.Equals(source, translated, StringComparison.Ordinal) ||
+                !HasSameProtectedTokens(source, translated))
+            {
+                Reject(source, "invalid-response");
+                Complete(source);
+                return;
+            }
+
+            try
+            {
+                Store(source, translated);
+                lastErrorType = null;
+            }
+            catch (Exception exception)
+            {
+                WarnOnce("accept-" + DescribeException(exception));
             }
             finally
             {
@@ -372,20 +386,30 @@ namespace OtogiTranslate
 
         private void Store(string source, string translated)
         {
+            Exception cacheError = null;
             lock (stateLock)
             {
                 if (cache.ContainsKey(source) || cache.Count >= MaxCacheEntries)
                     return;
+                cache[source] = translated;
+                translatedValues.Add(translated);
                 var item = new JObject();
                 item["source"] = source;
                 item["translation"] = translated;
-                File.AppendAllText(cachePath,
-                    item.ToString(Formatting.None) + Environment.NewLine,
-                    new UTF8Encoding(false));
-                cache[source] = translated;
-                translatedValues.Add(translated);
+                try
+                {
+                    File.AppendAllText(cachePath,
+                        item.ToString(Formatting.None) + Environment.NewLine,
+                        new UTF8Encoding(false));
+                }
+                catch (Exception exception)
+                {
+                    cacheError = exception;
+                }
             }
             info("[OtogiTranslate] llm-translated");
+            if (cacheError != null)
+                WarnOnce("cache-write-" + DescribeException(cacheError));
         }
 
         private void LogOnce(string text)
@@ -399,6 +423,16 @@ namespace OtogiTranslate
             if (shown.Length > 160)
                 shown = shown.Substring(0, 160) + "...";
             info("[OtogiTranslate] tmp-text=\"" + shown.Replace("\"", "\\\"") + "\"");
+        }
+
+        private void Reject(string source, string type)
+        {
+            lock (stateLock)
+                rejected.Add(source);
+            if (string.Equals(lastRejectionType, type, StringComparison.Ordinal))
+                return;
+            lastRejectionType = type;
+            warning("[OtogiTranslate] llm-rejected: " + type);
         }
 
         private void WarnOnce(string type)
@@ -441,6 +475,7 @@ namespace OtogiTranslate
             {
                 queue.Clear();
                 pending.Clear();
+                rejected.Clear();
             }
         }
     }

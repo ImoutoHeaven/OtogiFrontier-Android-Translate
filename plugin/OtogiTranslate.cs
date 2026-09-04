@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -13,7 +12,7 @@ using Newtonsoft.Json.Linq;
 #if !SELF_TEST
 using MelonLoader;
 
-[assembly: MelonInfo(typeof(OtogiTranslate.OtogiTranslatePlugin), "Otogi Translate", "0.5.0", "OtogiTranslate")]
+[assembly: MelonInfo(typeof(OtogiTranslate.OtogiTranslatePlugin), "Otogi Translate", "0.6.0", "OtogiTranslate")]
 #endif
 
 namespace OtogiTranslate
@@ -122,7 +121,7 @@ namespace OtogiTranslate
             var parsed = JObject.Parse(output);
             var runtimeConfig = RuntimeConfig.Parse(new[]
             {
-                "[LLM]", "Enable = true", "MaxQueue = 9999",
+                "[LLM]", "Enable = true", "RetryCount = 0", "MaxQueue = 9999",
                 "[UI]", "ScanIntervalSeconds = 0.01"
             });
             Uri endpoint;
@@ -132,8 +131,8 @@ namespace OtogiTranslate
                 (string)parsed["nested"][1] != "未翻訳" ||
                 !TranslationLogic.IsFontUrl("https://example.test/Assets/font?v=1") ||
                 TranslationLogic.IsFontUrl("https://example.test/Assets/fonts") ||
-                !runtimeConfig.Enable || runtimeConfig.MaxQueue != 1024 ||
-                runtimeConfig.ScanIntervalSeconds != 0.1 ||
+                !runtimeConfig.Enable || runtimeConfig.RetryCount != 0 ||
+                runtimeConfig.MaxQueue != 1024 || runtimeConfig.ScanIntervalSeconds != 0.1 ||
                 !RuntimeTranslator.IsTranslationCandidate("こんにちは") ||
                 RuntimeTranslator.IsTranslationCandidate("你好") ||
                 !RuntimeTranslator.TryValidateEndpoint(
@@ -143,7 +142,9 @@ namespace OtogiTranslate
                 !RuntimeTranslator.HasSameProtectedTokens(
                     "<color=red>こんにちは</color>", "<color=red>你好</color>") ||
                 RuntimeTranslator.HasSameProtectedTokens(
-                    "<color=red>こんにちは</color>", "你好"))
+                    "<color=red>こんにちは</color>", "你好") ||
+                !RuntimeTranslator.HasSameProtectedTokens("あ\nい", "甲\n乙") ||
+                RuntimeTranslator.HasSameProtectedTokens("あ\nい", "甲乙"))
                 throw new InvalidOperationException("translation self-check failed");
             CheckRuntimeQueue();
             Console.WriteLine("PASS translation self-check");
@@ -181,6 +182,32 @@ namespace OtogiTranslate
                         translator.Observe("<b>・你好</b>") != "<b>・你好</b>" ||
                         translator.TryTake(out queued))
                         throw new InvalidOperationException("runtime cache self-check failed");
+                    const string rejected = "さようなら";
+                    translator.Observe(rejected);
+                    if (!translator.TryTake(out queued) || queued != rejected)
+                        throw new InvalidOperationException("runtime rejection queue self-check failed");
+                    translator.Accept(rejected,
+                        "{\"choices\":[{\"message\":{\"content\":\"さようなら\"}}]}");
+                    translator.Observe(rejected);
+                    if (translator.TryTake(out queued))
+                        throw new InvalidOperationException("runtime rejection self-check failed");
+                }
+
+                var cachePath = Path.Combine(directory, "OtogiTranslate.cache.jsonl");
+                File.Delete(cachePath);
+                Directory.CreateDirectory(cachePath);
+                using (var translator = new RuntimeTranslator(
+                    directory, ignored => { }, ignored => { }))
+                {
+                    const string source = "おはよう";
+                    string queued;
+                    translator.Observe(source);
+                    if (!translator.TryTake(out queued) || queued != source)
+                        throw new InvalidOperationException("cache-error queue self-check failed");
+                    translator.Accept(source,
+                        "{\"choices\":[{\"message\":{\"content\":\"早上好\"}}]}");
+                    if (translator.Observe(source) != "早上好")
+                        throw new InvalidOperationException("cache-error fallback self-check failed");
                 }
             }
             finally
@@ -317,9 +344,33 @@ namespace OtogiTranslate
             IntPtr argument4,
             IntPtr methodInfo);
 
+#if SCENE_GATE_PROBE
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void EpisodeSetupCell(
+            IntPtr instance,
+            IntPtr episodeViewModel,
+            IntPtr methodInfo);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate IntPtr CharacterStoryTransition(
+            IntPtr instance,
+            int isAdult,
+            IntPtr episodeViewModel,
+            IntPtr methodInfo);
+#endif
+
         private static readonly object CacheLock = new object();
         private static readonly Dictionary<string, Dictionary<string, string>> Cache =
             new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
+        private static readonly Queue<string> DictionaryDownloads = new Queue<string>();
+        private static readonly HashSet<string> PendingDictionaries =
+            new HashSet<string>(StringComparer.Ordinal);
+        private static readonly HashSet<string> UnavailableDictionaries =
+            new HashSet<string>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, int> DictionaryAttempts =
+            new Dictionary<string, int>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, string> AdultDictionaryIds =
+            new Dictionary<string, string>(StringComparer.Ordinal);
 
         private static ClassGetMethodFromName _classGetMethod;
         private static ClassGetMethods _classGetMethods;
@@ -359,6 +410,14 @@ namespace OtogiTranslate
         private static HttpRequestConstructor _originalRequestConstructor;
         private static HttpRequestConstructor _requestConstructorDetour;
         private static IntPtr _requestConstructorTargetSlot;
+#if SCENE_GATE_PROBE
+        private static EpisodeSetupCell _originalEpisodeSetupCell;
+        private static EpisodeSetupCell _episodeSetupCellDetour;
+        private static IntPtr _episodeSetupCellTargetSlot;
+        private static CharacterStoryTransition _originalSceneTransition;
+        private static CharacterStoryTransition _sceneTransitionDetour;
+        private static IntPtr _sceneTransitionTargetSlot;
+#endif
         private static IntPtr _uriClass;
         private static IntPtr _uriConstructor;
         private static IntPtr _tmpFindObjects;
@@ -370,6 +429,7 @@ namespace OtogiTranslate
         private static IntPtr _uiTextTypeObject;
         private static IntPtr _byteClass;
         private static IntPtr _webRequestClass;
+        private static IntPtr _webRequestGet;
         private static IntPtr _uploadHandlerRawClass;
         private static IntPtr _downloadHandlerBufferClass;
         private static IntPtr _webRequestConstructor;
@@ -392,9 +452,24 @@ namespace OtogiTranslate
         private static int _mosaicErrorLogged;
         private static int _fontRedirectLogged;
         private static int _fontRedirectErrorLogged;
+#if SCENE_GATE_PROBE
+        private static int _requestTraceCount;
+        private static int _gateBypassLogged;
+        private static int _adultTransitionLogged;
+        private static int _probeResponseCount;
+        private static int _probeCaptureErrorLogged;
+#endif
         private static int _tmpScanHitLogged;
         private static int _tmpScanErrorLogged;
+        private static int _dictionaryPrefetchErrorLogged;
+        private static int _adultDictionaryMappingMissingLogged;
+        private static int _llmAppliedLogged;
         private static RuntimeTranslator _runtimeTranslator;
+        private static long _activeDictionaryRequestStarted;
+        private static long _nextDictionaryRequest;
+        private static uint _activeDictionaryRequestHandle;
+        private static string _activeDictionaryKey;
+        private static int _activeDictionaryAttempt;
         private static long _nextTmpScan;
         private static long _nextLlmRequest;
         private static long _activeRequestStarted;
@@ -404,6 +479,7 @@ namespace OtogiTranslate
         private static string _retrySource;
         private static int _retryAttempt;
         private static int _llmRequestLogged;
+        private static bool _llmCircuitOpen;
 
         public override void OnPreInitialization()
         {
@@ -488,7 +564,6 @@ namespace OtogiTranslate
                 _original = (DataAsTextGetter)Marshal.GetDelegateForFunctionPointer(
                     Marshal.ReadIntPtr(_targetSlot), typeof(DataAsTextGetter));
 
-                ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
                 MelonLogger.Msg("[OtogiTranslate] hook-installed");
 
                 try
@@ -623,6 +698,87 @@ namespace OtogiTranslate
                         "[OtogiTranslate] font-redirect-failed: " + exception.Message);
                 }
 
+#if SCENE_GATE_PROBE
+                try
+                {
+                    var gameAssembly = assemblyOpen(domainGet(), "Assembly-CSharp");
+                    var gameImage = gameAssembly == IntPtr.Zero
+                        ? IntPtr.Zero
+                        : assemblyGetImage(gameAssembly);
+                    var cellClass = gameImage == IntPtr.Zero
+                        ? IntPtr.Zero
+                        : classFromName(gameImage, "Otogi", "EpisodeScenarioCell");
+                    var setupCellMethod = cellClass == IntPtr.Zero
+                        ? IntPtr.Zero
+                        : _classGetMethod(cellClass, "SetupCell", 1);
+                    var setupCellTarget = setupCellMethod == IntPtr.Zero
+                        ? IntPtr.Zero
+                        : Marshal.ReadIntPtr(setupCellMethod);
+                    if (setupCellTarget == IntPtr.Zero)
+                        throw new InvalidOperationException(
+                            "EpisodeScenarioCell.SetupCell native pointer was not found");
+
+                    _episodeSetupCellDetour = BypassEpisodeGate;
+                    _episodeSetupCellTargetSlot = Marshal.AllocHGlobal(IntPtr.Size);
+                    Marshal.WriteIntPtr(_episodeSetupCellTargetSlot, setupCellTarget);
+                    MelonUtils.NativeHookAttach(
+                        _episodeSetupCellTargetSlot,
+                        Marshal.GetFunctionPointerForDelegate(
+                            _episodeSetupCellDetour));
+                    _originalEpisodeSetupCell = (EpisodeSetupCell)
+                        Marshal.GetDelegateForFunctionPointer(
+                            Marshal.ReadIntPtr(_episodeSetupCellTargetSlot),
+                            typeof(EpisodeSetupCell));
+                    MelonLogger.Msg(
+                        "[OtogiTranslate] gate-probe-installed viewable=1");
+                }
+                catch (Exception exception)
+                {
+                    MelonLogger.Error(
+                        "[OtogiTranslate] gate-probe-failed: " + exception.Message);
+                }
+
+                try
+                {
+                    var gameAssembly = assemblyOpen(domainGet(), "Assembly-CSharp");
+                    var gameImage = gameAssembly == IntPtr.Zero
+                        ? IntPtr.Zero
+                        : assemblyGetImage(gameAssembly);
+                    var sceneClass = gameImage == IntPtr.Zero
+                        ? IntPtr.Zero
+                        : classFromName(gameImage, "Otogi", "CharacterStoryScene");
+                    var transitionMethod = sceneClass == IntPtr.Zero
+                        ? IntPtr.Zero
+                        : _classGetMethod(
+                            sceneClass, "SceneTransitionAsObservable", 2);
+                    var transitionTarget = transitionMethod == IntPtr.Zero
+                        ? IntPtr.Zero
+                        : Marshal.ReadIntPtr(transitionMethod);
+                    if (transitionTarget == IntPtr.Zero)
+                        throw new InvalidOperationException(
+                            "CharacterStoryScene.SceneTransitionAsObservable native pointer was not found");
+
+                    _sceneTransitionDetour = ForceAdultTransition;
+                    _sceneTransitionTargetSlot = Marshal.AllocHGlobal(IntPtr.Size);
+                    Marshal.WriteIntPtr(_sceneTransitionTargetSlot, transitionTarget);
+                    MelonUtils.NativeHookAttach(
+                        _sceneTransitionTargetSlot,
+                        Marshal.GetFunctionPointerForDelegate(
+                            _sceneTransitionDetour));
+                    _originalSceneTransition = (CharacterStoryTransition)
+                        Marshal.GetDelegateForFunctionPointer(
+                            Marshal.ReadIntPtr(_sceneTransitionTargetSlot),
+                            typeof(CharacterStoryTransition));
+                    MelonLogger.Msg(
+                        "[OtogiTranslate] scene-probe-installed forceAdult=1");
+                }
+                catch (Exception exception)
+                {
+                    MelonLogger.Error(
+                        "[OtogiTranslate] scene-probe-failed: " + exception.Message);
+                }
+#endif
+
                 try
                 {
                     _runtimeTranslator = new RuntimeTranslator(
@@ -633,53 +789,91 @@ namespace OtogiTranslate
                         "[OtogiTranslate] config-loaded path={0} llm={1}",
                         _runtimeTranslator.ConfigPath,
                         _runtimeTranslator.Config.Enable ? "enabled" : "disabled"));
+
+                    var webAssembly = assemblyOpen(
+                        domainGet(), "UnityEngine.UnityWebRequestModule");
+                    if (webAssembly == IntPtr.Zero)
+                        throw new InvalidOperationException(
+                            "UnityWebRequestModule assembly was not found");
+                    var webImage = assemblyGetImage(webAssembly);
+                    if (webImage == IntPtr.Zero)
+                        throw new InvalidOperationException(
+                            "UnityWebRequestModule image was not found");
+                    _webRequestClass = classFromName(
+                        webImage, "UnityEngine.Networking", "UnityWebRequest");
+                    _downloadHandlerBufferClass = classFromName(
+                        webImage, "UnityEngine.Networking", "DownloadHandlerBuffer");
+                    if (_webRequestClass == IntPtr.Zero ||
+                        _downloadHandlerBufferClass == IntPtr.Zero)
+                        throw new InvalidOperationException(
+                            "UnityWebRequest or DownloadHandlerBuffer was not found");
+
+                    _webRequestGet = FindMethod(
+                        _webRequestClass, "Get", 1, "System.String");
+                    _webRequestSend = FindMethod(
+                        _webRequestClass, "SendWebRequest");
+                    _webRequestIsDone = FindMethod(
+                        _webRequestClass, "get_isDone");
+                    _webRequestResponseCode = FindMethod(
+                        _webRequestClass, "get_responseCode");
+                    _webRequestDownloadHandler = FindMethod(
+                        _webRequestClass, "get_downloadHandler");
+                    _webRequestAbort = FindMethod(_webRequestClass, "Abort");
+                    _webRequestDispose = FindMethod(_webRequestClass, "Dispose");
+                    _downloadHandlerText = FindMethod(
+                        _downloadHandlerBufferClass, "get_text");
+                    MelonLogger.Msg(
+                        "[OtogiTranslate] dictionary-transport-installed UnityWebRequest");
+
                     if (_runtimeTranslator.Config.Enable)
                     {
-                        var webAssembly = assemblyOpen(
-                            domainGet(), "UnityEngine.UnityWebRequestModule");
-                        var webImage = webAssembly == IntPtr.Zero
-                            ? IntPtr.Zero
-                            : assemblyGetImage(webAssembly);
-                        _webRequestClass = classFromName(
-                            webImage, "UnityEngine.Networking", "UnityWebRequest");
                         _uploadHandlerRawClass = classFromName(
                             webImage, "UnityEngine.Networking", "UploadHandlerRaw");
-                        _downloadHandlerBufferClass = classFromName(
-                            webImage, "UnityEngine.Networking", "DownloadHandlerBuffer");
-                        if (_webRequestClass == IntPtr.Zero ||
-                            _uploadHandlerRawClass == IntPtr.Zero ||
-                            _downloadHandlerBufferClass == IntPtr.Zero)
+                        if (_uploadHandlerRawClass == IntPtr.Zero)
                             throw new InvalidOperationException(
-                                "UnityWebRequest handlers were not found");
-
+                                "UploadHandlerRaw was not found");
                         _webRequestConstructor = FindMethod(
                             _webRequestClass, ".ctor", 4, "System.String");
                         _uploadHandlerRawConstructor = FindMethod(
                             _uploadHandlerRawClass, ".ctor", 1, "System.Byte[]");
                         _downloadHandlerBufferConstructor = FindMethod(
                             _downloadHandlerBufferClass, ".ctor");
-                        _webRequestSend = FindMethod(
-                            _webRequestClass, "SendWebRequest");
-                        _webRequestIsDone = FindMethod(
-                            _webRequestClass, "get_isDone");
-                        _webRequestResponseCode = FindMethod(
-                            _webRequestClass, "get_responseCode");
-                        _webRequestDownloadHandler = FindMethod(
-                            _webRequestClass, "get_downloadHandler");
                         _webRequestSetHeader = FindMethod(
                             _webRequestClass, "SetRequestHeader", 2, "System.String");
-                        _webRequestAbort = FindMethod(_webRequestClass, "Abort");
-                        _webRequestDispose = FindMethod(_webRequestClass, "Dispose");
-                        _downloadHandlerText = FindMethod(
-                            _downloadHandlerBufferClass, "get_text");
                         MelonLogger.Msg(
                             "[OtogiTranslate] llm-transport-installed UnityWebRequest");
                     }
+
+                    var uiAssembly = assemblyOpen(domainGet(), "UnityEngine.UI");
+                    var eventSystem = uiAssembly == IntPtr.Zero
+                        ? IntPtr.Zero
+                        : classFromName(
+                            assemblyGetImage(uiAssembly),
+                            "UnityEngine.EventSystems", "EventSystem");
+                    if (eventSystem == IntPtr.Zero)
+                        throw new InvalidOperationException("EventSystem was not found");
+                    var updateMethod = FindMethod(eventSystem, "Update");
+                    var updateTarget = Marshal.ReadIntPtr(updateMethod);
+                    if (updateTarget == IntPtr.Zero)
+                        throw new InvalidOperationException(
+                            "EventSystem.Update native pointer was not found");
+                    _eventSystemUpdateDetour = EventSystemUpdate;
+                    _eventSystemUpdateTargetSlot = Marshal.AllocHGlobal(IntPtr.Size);
+                    Marshal.WriteIntPtr(_eventSystemUpdateTargetSlot, updateTarget);
+                    MelonUtils.NativeHookAttach(
+                        _eventSystemUpdateTargetSlot,
+                        Marshal.GetFunctionPointerForDelegate(_eventSystemUpdateDetour));
+                    _originalEventSystemUpdate = (UnityUpdate)
+                        Marshal.GetDelegateForFunctionPointer(
+                            Marshal.ReadIntPtr(_eventSystemUpdateTargetSlot),
+                            typeof(UnityUpdate));
+                    MelonLogger.Msg(
+                        "[OtogiTranslate] runtime-driver-installed EventSystem.Update");
+
                     if (_runtimeTranslator.ShouldScan)
                     {
                         var tmpAssembly = assemblyOpen(domainGet(), "Unity.TextMeshPro");
                         var unityAssembly = assemblyOpen(domainGet(), "UnityEngine.CoreModule");
-                        var uiAssembly = assemblyOpen(domainGet(), "UnityEngine.UI");
                         var tmpClass = tmpAssembly == IntPtr.Zero
                             ? IntPtr.Zero
                             : classFromName(
@@ -688,20 +882,15 @@ namespace OtogiTranslate
                             ? IntPtr.Zero
                             : classFromName(
                                 assemblyGetImage(unityAssembly), "UnityEngine", "Object");
-                        var eventSystem = uiAssembly == IntPtr.Zero
-                            ? IntPtr.Zero
-                            : classFromName(
-                                assemblyGetImage(uiAssembly),
-                                "UnityEngine.EventSystems", "EventSystem");
                         var uiTextClass = uiAssembly == IntPtr.Zero
                             ? IntPtr.Zero
                             : classFromName(
                                 assemblyGetImage(uiAssembly),
                                 "UnityEngine.UI", "Text");
                         if (tmpClass == IntPtr.Zero || unityObject == IntPtr.Zero ||
-                            eventSystem == IntPtr.Zero || uiTextClass == IntPtr.Zero)
+                            uiTextClass == IntPtr.Zero)
                             throw new InvalidOperationException(
-                                "TMP_Text, UI.Text, UnityEngine.Object, or EventSystem was not found");
+                                "TMP_Text, UI.Text, or UnityEngine.Object was not found");
 
                         _tmpFindObjects = FindMethod(
                             unityObject, "FindObjectsOfType", 1, "System.Type");
@@ -716,21 +905,6 @@ namespace OtogiTranslate
                         if (_tmpTypeObject == IntPtr.Zero || _uiTextTypeObject == IntPtr.Zero)
                             throw new InvalidOperationException(
                                 "TMP_Text or UI.Text System.Type was not found");
-                        var updateMethod = FindMethod(eventSystem, "Update");
-                        var updateTarget = Marshal.ReadIntPtr(updateMethod);
-                        if (updateTarget == IntPtr.Zero)
-                            throw new InvalidOperationException(
-                                "EventSystem.Update native pointer was not found");
-                        _eventSystemUpdateDetour = EventSystemUpdate;
-                        _eventSystemUpdateTargetSlot = Marshal.AllocHGlobal(IntPtr.Size);
-                        Marshal.WriteIntPtr(_eventSystemUpdateTargetSlot, updateTarget);
-                        MelonUtils.NativeHookAttach(
-                            _eventSystemUpdateTargetSlot,
-                            Marshal.GetFunctionPointerForDelegate(_eventSystemUpdateDetour));
-                        _originalEventSystemUpdate = (UnityUpdate)
-                            Marshal.GetDelegateForFunctionPointer(
-                                Marshal.ReadIntPtr(_eventSystemUpdateTargetSlot),
-                                typeof(UnityUpdate));
                         MelonLogger.Msg(string.Format(
                             CultureInfo.InvariantCulture,
                             "[OtogiTranslate] ui-scan-installed interval={0:0.###}s driver=EventSystem.Update",
@@ -749,7 +923,7 @@ namespace OtogiTranslate
                         _runtimeTranslator = null;
                     }
                     MelonLogger.Error(
-                        "[OtogiTranslate] tmp-scan-failed: " + exception.Message);
+                        "[OtogiTranslate] runtime-init-failed: " + exception.Message);
                 }
             }
             catch (Exception exception)
@@ -771,14 +945,195 @@ namespace OtogiTranslate
 
         private static void TickRuntime()
         {
+            TickDictionaryQueue();
             TickLlmQueue();
             TickTmpScan();
+        }
+
+        private static void TickDictionaryQueue()
+        {
+            if (_webRequestGet == IntPtr.Zero)
+                return;
+
+            if (_activeDictionaryRequestHandle != 0)
+            {
+                PollDictionaryRequest();
+                if (_activeDictionaryRequestHandle != 0)
+                    return;
+            }
+
+            if (Stopwatch.GetTimestamp() < _nextDictionaryRequest)
+                return;
+
+            string key;
+            lock (CacheLock)
+            {
+                if (DictionaryDownloads.Count == 0)
+                    return;
+                key = DictionaryDownloads.Dequeue();
+            }
+            StartDictionaryRequest(key);
+        }
+
+        private static void StartDictionaryRequest(string key)
+        {
+            _activeDictionaryKey = key;
+            lock (CacheLock)
+            {
+                int attempt;
+                DictionaryAttempts.TryGetValue(key, out attempt);
+                _activeDictionaryAttempt = attempt + 1;
+                DictionaryAttempts[key] = _activeDictionaryAttempt;
+            }
+            try
+            {
+                var request = Invoke(
+                    _webRequestGet,
+                    IntPtr.Zero,
+                    ToIl2CppString(RemoteRoot + "/" + key + "_gb.json"));
+                _activeDictionaryRequestHandle = _gcHandleNew(request, false);
+                if (_activeDictionaryRequestHandle == 0)
+                    throw new InvalidOperationException("Could not retain dictionary request");
+                _activeDictionaryRequestStarted = Stopwatch.GetTimestamp();
+                Invoke(_webRequestSend, request);
+                MelonLogger.Msg("[OtogiTranslate] dictionary-request-started key=" + key);
+            }
+            catch (Exception exception)
+            {
+                FailDictionaryRequest("request-start-" + exception.GetType().Name);
+            }
+        }
+
+        private static void PollDictionaryRequest()
+        {
+            var request = _gcHandleGetTarget(_activeDictionaryRequestHandle);
+            if (request == IntPtr.Zero)
+            {
+                FailDictionaryRequest("request-lost");
+                return;
+            }
+            if (Stopwatch.GetTimestamp() - _activeDictionaryRequestStarted >
+                30L * Stopwatch.Frequency)
+            {
+                FailDictionaryRequest("timeout");
+                return;
+            }
+
+            try
+            {
+                if (!ReadBoxedBoolean(Invoke(_webRequestIsDone, request)))
+                    return;
+                var status = ReadBoxedInt64(Invoke(_webRequestResponseCode, request));
+                if (status < 200 || status >= 300)
+                {
+                    FailDictionaryRequest(status == 0
+                        ? "unitywebrequest-error"
+                        : "http-" + status.ToString(CultureInfo.InvariantCulture));
+                    return;
+                }
+
+                var download = Invoke(_webRequestDownloadHandler, request);
+                var json = ToManagedString(Invoke(_downloadHandlerText, download));
+                if (json == null || json.Length > 4 * 1024 * 1024)
+                    throw new InvalidDataException("translation JSON is too large");
+                var dictionary = TranslationLogic.ParseDictionary(json);
+                var key = _activeDictionaryKey;
+                var slash = key.IndexOf('/');
+                var path = GetDictionaryPath(
+                    key.Substring(0, slash), key.Substring(slash + 1));
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                var temporaryPath = path + ".tmp";
+                File.WriteAllText(temporaryPath, json, new UTF8Encoding(false));
+                if (File.Exists(path))
+                    File.Delete(path);
+                File.Move(temporaryPath, path);
+                ReleaseDictionaryRequest(false);
+                lock (CacheLock)
+                {
+                    Cache[key] = dictionary;
+                    PendingDictionaries.Remove(key);
+                    DictionaryAttempts.Remove(key);
+                }
+                MelonLogger.Msg(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[OtogiTranslate] dictionary-downloaded type={0} id={1} entries={2}",
+                    key.Substring(0, slash),
+                    key.Substring(slash + 1),
+                    dictionary.Count));
+            }
+            catch (Exception exception)
+            {
+                FailDictionaryRequest("response-" + exception.GetType().Name);
+            }
+        }
+
+        private static void FailDictionaryRequest(string reason)
+        {
+            var key = _activeDictionaryKey;
+            var attempt = _activeDictionaryAttempt;
+            ReleaseDictionaryRequest(true);
+            if (key == null)
+                return;
+            if (IsRetryableRequestFailure(reason) && attempt < 3)
+            {
+                lock (CacheLock)
+                    DictionaryDownloads.Enqueue(key);
+                _nextDictionaryRequest = Stopwatch.GetTimestamp() +
+                    (1L << (attempt - 1)) * Stopwatch.Frequency;
+                MelonLogger.Warning(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[OtogiTranslate] dictionary-request-retry key={0} attempt={1}",
+                    key,
+                    attempt + 1));
+                return;
+            }
+            lock (CacheLock)
+            {
+                PendingDictionaries.Remove(key);
+                DictionaryAttempts.Remove(key);
+                if (string.Equals(reason, "http-404", StringComparison.Ordinal))
+                    UnavailableDictionaries.Add(key);
+            }
+            MelonLogger.Warning(string.Format(
+                CultureInfo.InvariantCulture,
+                "[OtogiTranslate] dictionary-download-failed key={0} reason={1}",
+                key,
+                reason));
+        }
+
+        private static void ReleaseDictionaryRequest(bool abort)
+        {
+            var handle = _activeDictionaryRequestHandle;
+            _activeDictionaryRequestHandle = 0;
+            _activeDictionaryRequestStarted = 0;
+            _activeDictionaryKey = null;
+            _activeDictionaryAttempt = 0;
+            if (handle == 0)
+                return;
+            try
+            {
+                var request = _gcHandleGetTarget(handle);
+                if (request != IntPtr.Zero)
+                {
+                    if (abort)
+                        Invoke(_webRequestAbort, request);
+                    Invoke(_webRequestDispose, request);
+                }
+            }
+            catch
+            {
+                // Releasing a completed/aborted request is best-effort during teardown.
+            }
+            finally
+            {
+                _gcHandleFree(handle);
+            }
         }
 
         private static void TickLlmQueue()
         {
             if (_runtimeTranslator == null || !_runtimeTranslator.Config.Enable ||
-                _webRequestClass == IntPtr.Zero)
+                _webRequestClass == IntPtr.Zero || _llmCircuitOpen)
                 return;
 
             if (_activeRequestHandle != 0)
@@ -918,18 +1273,49 @@ namespace OtogiTranslate
             var source = _activeSource;
             var attempt = _activeAttempt;
             ReleaseActiveRequest(true);
-            if (_runtimeTranslator != null && source != null &&
-                attempt < _runtimeTranslator.Config.RetryCount)
+            var retryable = IsRetryableRequestFailure(reason);
+            if (_runtimeTranslator != null && source != null && retryable &&
+                attempt <= _runtimeTranslator.Config.RetryCount)
             {
                 _retrySource = source;
                 _retryAttempt = attempt + 1;
-                DelayNextRequest(200 * attempt);
+                DelayNextRequest(Math.Min(30000, 1000 << Math.Min(attempt - 1, 4)));
                 return;
             }
             if (_runtimeTranslator != null && source != null)
                 _runtimeTranslator.Fail(source, reason);
-            if (_runtimeTranslator != null)
-                DelayNextRequest(1000 / _runtimeTranslator.Config.RequestsPerSecond);
+            if (_runtimeTranslator == null)
+                return;
+            if (IsPermanentLlmFailure(reason))
+            {
+                _llmCircuitOpen = true;
+                MelonLogger.Warning("[OtogiTranslate] llm-paused reason=" + reason);
+            }
+            else
+            {
+                DelayNextRequest(retryable
+                    ? 30000
+                    : 1000 / _runtimeTranslator.Config.RequestsPerSecond);
+            }
+        }
+
+        private static bool IsRetryableRequestFailure(string reason)
+        {
+            int status;
+            if (!reason.StartsWith("http-", StringComparison.Ordinal) ||
+                !int.TryParse(reason.Substring(5), NumberStyles.Integer,
+                    CultureInfo.InvariantCulture, out status))
+                return true;
+            return status == 408 || status == 429 || status >= 500;
+        }
+
+        private static bool IsPermanentLlmFailure(string reason)
+        {
+            int status;
+            return reason.StartsWith("http-", StringComparison.Ordinal) &&
+                int.TryParse(reason.Substring(5), NumberStyles.Integer,
+                    CultureInfo.InvariantCulture, out status) &&
+                status >= 400 && status < 500 && status != 408 && status != 429;
         }
 
         private static void ReleaseActiveRequest(bool abort)
@@ -1000,6 +1386,7 @@ namespace OtogiTranslate
 
         public override void OnApplicationQuit()
         {
+            ReleaseDictionaryRequest(true);
             ReleaseActiveRequest(true);
             var translator = _runtimeTranslator;
             _runtimeTranslator = null;
@@ -1073,7 +1460,8 @@ namespace OtogiTranslate
                 var absoluteUri = uri == IntPtr.Zero
                     ? IntPtr.Zero
                     : Invoke(FindMethod(_objectGetClass(uri), "get_AbsoluteUri"), uri);
-                if (TranslationLogic.IsFontUrl(ToManagedString(absoluteUri)))
+                var requestUrl = ToManagedString(absoluteUri);
+                if (TranslationLogic.IsFontUrl(requestUrl))
                 {
                     var replacement = _objectNew(_uriClass);
                     Invoke(
@@ -1081,9 +1469,14 @@ namespace OtogiTranslate
                         replacement,
                         ToIl2CppString(FontUrl));
                     uri = replacement;
+                    requestUrl = FontUrl;
                     if (Interlocked.Exchange(ref _fontRedirectLogged, 1) == 0)
                         MelonLogger.Msg("[OtogiTranslate] font-redirected");
                 }
+#if SCENE_GATE_PROBE
+                if (IsTraceRequest(requestUrl))
+                    LogRequest(requestUrl);
+#endif
             }
             catch (Exception exception)
             {
@@ -1101,14 +1494,47 @@ namespace OtogiTranslate
                 methodInfo);
         }
 
+#if SCENE_GATE_PROBE
+        private static bool IsTraceRequest(string url)
+        {
+            if (string.IsNullOrEmpty(url))
+                return false;
+            return url.IndexOf("/api/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("/Assets/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("/asset", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf(".bundle", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf(".unity3d", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("/chara/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("/scene/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("/sound/", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static void LogRequest(string url)
+        {
+            var number = Interlocked.Increment(ref _requestTraceCount);
+            if (number > 2048)
+                return;
+            Uri parsed;
+            var shown = Uri.TryCreate(url, UriKind.Absolute, out parsed)
+                ? parsed.GetLeftPart(UriPartial.Path) + parsed.Query
+                : url;
+            MelonLogger.Msg(string.Format(
+                CultureInfo.InvariantCulture,
+                "[OtogiTranslate] http-request n={0} url={1}",
+                number,
+                shown));
+        }
+
+#endif
+
         private static void ScanTmpText()
         {
             try
             {
                 var tmpCount = ScanTextType(
-                    _tmpTypeObject, _tmpGetText, _tmpSetText);
+                    "tmp", _tmpTypeObject, _tmpGetText, _tmpSetText);
                 var uiCount = ScanTextType(
-                    _uiTextTypeObject, _uiTextGetText, _uiTextSetText);
+                    "legacy", _uiTextTypeObject, _uiTextGetText, _uiTextSetText);
                 if (Interlocked.Exchange(ref _tmpScanHitLogged, 1) == 0)
                     MelonLogger.Msg(string.Format(
                         "[OtogiTranslate] ui-scan-hit tmp={0} legacy={1}",
@@ -1123,6 +1549,7 @@ namespace OtogiTranslate
         }
 
         private static ulong ScanTextType(
+            string component,
             IntPtr typeObject,
             IntPtr getText,
             IntPtr setText)
@@ -1146,6 +1573,13 @@ namespace OtogiTranslate
                 if (string.Equals(source, translated, StringComparison.Ordinal))
                     continue;
                 Invoke(setText, instance, ToIl2CppString(translated));
+                var applied = Interlocked.Increment(ref _llmAppliedLogged);
+                if (applied <= 64)
+                    MelonLogger.Msg(string.Format(
+                        CultureInfo.InvariantCulture,
+                        "[OtogiTranslate] ui-translation-applied n={0} component={1}",
+                        applied,
+                        component));
             }
             return length;
         }
@@ -1160,24 +1594,43 @@ namespace OtogiTranslate
 
             try
             {
+                var responseUrl = GetResponseUrl(instance);
+#if SCENE_GATE_PROBE
+                CaptureProbeResponse(instance, responseUrl, result);
+#endif
+                var originalJson = ToManagedString(result);
+                QueueEpisodeDictionaries(responseUrl, originalJson);
                 string type;
                 string id;
-                if (!TryGetTranslationKey(GetResponseUrl(instance), out type, out id))
+                if (!TryGetTranslationKey(responseUrl, out type, out id))
                     return result;
 
-                var dictionary = GetDictionary(type, id);
+                var dictionaryId = type == "MAdults"
+                    ? GetAdultDictionaryId(id)
+                    : id;
+                if (dictionaryId == null)
+                {
+                    if (Interlocked.Exchange(
+                        ref _adultDictionaryMappingMissingLogged, 1) == 0)
+                    {
+                        MelonLogger.Warning(
+                            "[OtogiTranslate] adult-dictionary-mapping-missing id=" + id);
+                    }
+                    return result;
+                }
+                var dictionary = GetDictionary(type, dictionaryId);
                 if (dictionary == null)
                     return result;
 
                 int replacements;
                 var translated = TranslationLogic.TranslateJson(
-                    ToManagedString(result), dictionary, out replacements);
+                    originalJson, dictionary, out replacements);
                 if (replacements == 0)
                     return result;
 
                 MelonLogger.Msg(string.Format(
-                    "[OtogiTranslate] translated type={0} id={1} replacements={2}",
-                    type, id, replacements));
+                    "[OtogiTranslate] translated type={0} id={1} dictionary={2} replacements={3}",
+                    type, id, dictionaryId, replacements));
                 return ToIl2CppString(translated);
             }
             catch (Exception exception)
@@ -1201,6 +1654,107 @@ namespace OtogiTranslate
             var absoluteUri = Invoke(FindMethod(_objectGetClass(uri), "get_AbsoluteUri"), uri);
             return ToManagedString(absoluteUri);
         }
+
+#if SCENE_GATE_PROBE
+        private static void BypassEpisodeGate(
+            IntPtr instance,
+            IntPtr episodeViewModel,
+            IntPtr methodInfo)
+        {
+            if (episodeViewModel != IntPtr.Zero)
+            {
+                var wasViewable = Marshal.ReadByte(episodeViewModel, 0x35);
+                Marshal.WriteByte(episodeViewModel, 0x35, 1);
+                if (wasViewable == 0 &&
+                    Interlocked.Increment(ref _gateBypassLogged) <= 256)
+                {
+                    MelonLogger.Msg(string.Format(
+                        CultureInfo.InvariantCulture,
+                        "[OtogiTranslate] gate-bypass flow={0} unlockType={1}",
+                        Marshal.ReadInt32(episodeViewModel, 0x10),
+                        Marshal.ReadInt32(episodeViewModel, 0x38)));
+                }
+            }
+            _originalEpisodeSetupCell(instance, episodeViewModel, methodInfo);
+        }
+
+        private static IntPtr ForceAdultTransition(
+            IntPtr instance,
+            int isAdult,
+            IntPtr episodeViewModel,
+            IntPtr methodInfo)
+        {
+            if (isAdult == 0 && episodeViewModel != IntPtr.Zero &&
+                Interlocked.Increment(ref _adultTransitionLogged) <= 256)
+            {
+                MelonLogger.Msg(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[OtogiTranslate] scene-probe flow={0} forceAdult=1",
+                    Marshal.ReadInt32(episodeViewModel, 0x10)));
+            }
+            return _originalSceneTransition(instance, 1, episodeViewModel, methodInfo);
+        }
+
+        private static bool IsProbeResponse(string url)
+        {
+            if (string.IsNullOrEmpty(url))
+                return false;
+            return url.IndexOf("/api/Episode/CharacterStory", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("/api/episode/monsters/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("/api/episode/spirits/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("/api/MSceneAdultFlow/SendGift/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("/api/MAdults/NextAdultScene/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("/api/MAdults/MonsterMAdults/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("/api/MScenes/", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static void CaptureProbeResponse(
+            IntPtr response,
+            string url,
+            IntPtr result)
+        {
+            if (!IsProbeResponse(url))
+                return;
+
+            var number = Interlocked.Increment(ref _probeResponseCount);
+            if (number > 512)
+                return;
+
+            try
+            {
+                var body = result == IntPtr.Zero ? string.Empty : ToManagedString(result);
+                var record = new JObject();
+                record["url"] = url;
+                record["statusCode"] = Marshal.ReadInt32(response, 0x18);
+                record["body"] = body ?? string.Empty;
+                var directory = Path.Combine(
+                    MelonUtils.GetApplicationPath(),
+                    "UserData", "OtogiProbe", "responses");
+                Directory.CreateDirectory(directory);
+                var path = Path.Combine(
+                    directory,
+                    number.ToString("D4", CultureInfo.InvariantCulture) + ".json");
+                File.WriteAllText(
+                    path,
+                    record.ToString(Formatting.None),
+                    new UTF8Encoding(false));
+                MelonLogger.Msg(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[OtogiTranslate] probe-response n={0} status={1} path={2} chars={3}",
+                    number,
+                    Marshal.ReadInt32(response, 0x18),
+                    new Uri(url).AbsolutePath,
+                    body == null ? 0 : body.Length));
+            }
+            catch (Exception exception)
+            {
+                if (Interlocked.Exchange(ref _probeCaptureErrorLogged, 1) == 0)
+                    MelonLogger.Warning(
+                        "[OtogiTranslate] probe-capture-error: " + exception.Message);
+            }
+        }
+
+#endif
 
         private static bool TryGetTranslationKey(
             string url,
@@ -1233,7 +1787,7 @@ namespace OtogiTranslate
                 return false;
 
             var candidate = path.Substring(markerIndex + marker.Length);
-            if (candidate.Length == 0 || candidate.IndexOf('/') >= 0)
+            if (candidate.Length == 0 || candidate.Length > 10 || candidate.IndexOf('/') >= 0)
                 return false;
             for (var index = 0; index < candidate.Length; index++)
             {
@@ -1244,6 +1798,120 @@ namespace OtogiTranslate
             return true;
         }
 
+        private static void QueueEpisodeDictionaries(string url, string json)
+        {
+            if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(json))
+                return;
+            try
+            {
+                if (url.IndexOf("/api/episode/monsters/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    url.IndexOf("/api/episode/spirits/", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var episodes = JObject.Parse(json)["Episodes"] as JArray;
+                    if (episodes == null)
+                        return;
+                    foreach (var episode in episodes)
+                    {
+                        var sceneId = ReadNumericId(episode["MSceneId"]);
+                        var adultId = ReadNumericId(episode["MAdultId"]);
+                        if (sceneId != null && adultId != null)
+                        {
+                            lock (CacheLock)
+                                AdultDictionaryIds[adultId] = sceneId;
+                        }
+                        if (episode.Value<bool?>("Viewable") != true)
+                            continue;
+                        QueueDictionary("MScenes", sceneId);
+                        QueueDictionary("MAdults", sceneId);
+                    }
+                    return;
+                }
+
+                var worldStories = url.IndexOf(
+                    "/api/Episode/WorldStories", StringComparison.OrdinalIgnoreCase) >= 0;
+                var sideStories = url.IndexOf(
+                    "/api/UAdventures/SideStories", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (!worldStories && !sideStories)
+                    return;
+                var items = JArray.Parse(json);
+                if (worldStories)
+                {
+                    foreach (var item in items)
+                        QueueDictionary("Mstory", ReadNumericId(item["MStoryId"]));
+                }
+                else
+                {
+                    foreach (var item in items)
+                    {
+                        var adventures = item["Adventures"] as JArray;
+                        if (adventures == null)
+                            continue;
+                        foreach (var adventure in adventures)
+                            QueueDictionary("MScenes", ReadNumericId(adventure["MSceneId"]));
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                if (Interlocked.Exchange(ref _dictionaryPrefetchErrorLogged, 1) == 0)
+                    MelonLogger.Warning(
+                        "[OtogiTranslate] dictionary-prefetch-error: " + exception.Message);
+            }
+        }
+
+        private static string ReadNumericId(JToken token)
+        {
+            if (token == null || token.Type == JTokenType.Null)
+                return null;
+            var value = token.Type == JTokenType.Integer
+                ? Convert.ToString(((JValue)token).Value, CultureInfo.InvariantCulture)
+                : (string)token;
+            if (string.IsNullOrEmpty(value) || value.Length > 10)
+                return null;
+            for (var index = 0; index < value.Length; index++)
+            {
+                if (value[index] < '0' || value[index] > '9')
+                    return null;
+            }
+            return value;
+        }
+
+        private static string GetAdultDictionaryId(string adultId)
+        {
+            lock (CacheLock)
+            {
+                string sceneId;
+                return AdultDictionaryIds.TryGetValue(adultId, out sceneId)
+                    ? sceneId
+                    : null;
+            }
+        }
+
+        private static void QueueDictionary(string type, string id)
+        {
+            if (id == null)
+                return;
+            var key = type + "/" + id;
+            if (File.Exists(GetDictionaryPath(type, id)))
+                return;
+            lock (CacheLock)
+            {
+                if (Cache.ContainsKey(key) || PendingDictionaries.Contains(key) ||
+                    UnavailableDictionaries.Contains(key))
+                    return;
+                PendingDictionaries.Add(key);
+                DictionaryDownloads.Enqueue(key);
+            }
+            MelonLogger.Msg("[OtogiTranslate] dictionary-queued key=" + key);
+        }
+
+        private static string GetDictionaryPath(string type, string id)
+        {
+            return Path.Combine(
+                MelonUtils.GetApplicationPath(),
+                "UserData", "OtogiTranslate", type, id + "_gb.json");
+        }
+
         private static Dictionary<string, string> GetDictionary(string type, string id)
         {
             var key = type + "/" + id;
@@ -1252,54 +1920,58 @@ namespace OtogiTranslate
                 Dictionary<string, string> cached;
                 if (Cache.TryGetValue(key, out cached))
                     return cached;
+            }
 
+            var localPath = GetDictionaryPath(type, id);
+            if (!File.Exists(localPath))
+            {
+                QueueDictionary(type, id);
+                return null;
+            }
+
+            try
+            {
+                var cached = TranslationLogic.ParseDictionary(
+                    File.ReadAllText(localPath, Encoding.UTF8));
+                lock (CacheLock)
+                    Cache[key] = cached;
+                MelonLogger.Msg(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[OtogiTranslate] dictionary-loaded type={0} id={1} source=local entries={2}",
+                    type, id, cached.Count));
+                return cached;
+            }
+            catch (Exception exception)
+            {
+                Exception quarantineError = null;
                 try
                 {
-                    var localPath = Path.Combine(
-                        MelonUtils.GetApplicationPath(),
-                        "UserData", "OtogiTranslate", type, id + "_gb.json");
-                    string json;
-                    string source;
-                    if (File.Exists(localPath))
-                    {
-                        json = File.ReadAllText(localPath, Encoding.UTF8);
-                        source = "local";
-                    }
-                    else
-                    {
-                        json = Download(RemoteRoot + "/" + type + "/" + id + "_gb.json");
-                        source = "remote";
-                    }
-
-                    cached = TranslationLogic.ParseDictionary(json);
-                    Cache[key] = cached;
-                    MelonLogger.Msg(string.Format(
-                        "[OtogiTranslate] dictionary-loaded type={0} id={1} source={2} entries={3}",
-                        type, id, source, cached.Count));
-                    return cached;
+                    var invalidPath = localPath + ".invalid";
+                    if (File.Exists(invalidPath))
+                        File.Delete(invalidPath);
+                    File.Move(localPath, invalidPath);
                 }
-                catch (Exception exception)
+                catch (Exception quarantineException)
                 {
-                    Cache[key] = null;
-                    MelonLogger.Warning(string.Format(
-                        "[OtogiTranslate] dictionary-missing type={0} id={1}: {2}",
-                        type, id, exception.Message));
-                    return null;
+                    quarantineError = quarantineException;
                 }
+                if (quarantineError == null)
+                {
+                    QueueDictionary(type, id);
+                }
+                else
+                {
+                    MelonLogger.Warning(string.Format(
+                        CultureInfo.InvariantCulture,
+                        "[OtogiTranslate] dictionary-quarantine-failed type={0} id={1}: {2}",
+                        type, id, quarantineError.Message));
+                }
+                MelonLogger.Warning(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[OtogiTranslate] dictionary-invalid type={0} id={1}: {2}",
+                    type, id, exception.Message));
+                return null;
             }
-        }
-
-        private static string Download(string url)
-        {
-            var request = (HttpWebRequest)WebRequest.Create(url);
-            request.Method = "GET";
-            request.Timeout = 7000;
-            request.ReadWriteTimeout = 7000;
-            request.UserAgent = "OtogiTranslate/0.3";
-            using (var response = (HttpWebResponse)request.GetResponse())
-            using (var reader = new StreamReader(
-                response.GetResponseStream(), new UTF8Encoding(false, true), true))
-                return reader.ReadToEnd();
         }
 
         private static IntPtr ReadReferenceField(IntPtr instance, string name)

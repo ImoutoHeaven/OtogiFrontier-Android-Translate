@@ -31,7 +31,7 @@ LemonLoader 版本。构建、签名和校验全部在 Docker 中完成；官方
 先在模拟器的 DMM GAMES STORE 中更新官方版，再运行：
 
 ```powershell
-pwsh -NoProfile -File ./release.ps1 `
+pwsh -NoProfile -NonInteractive -File ./release.ps1 `
   -AdbPath "C:\Android\platform-tools\adb.exe" `
   -CreateKey
 ```
@@ -48,14 +48,14 @@ pwsh -NoProfile -File ./release.ps1 `
 `-CreateKey` 只用于第一次构建。之后运行同一命令但去掉该参数：
 
 ```powershell
-pwsh -NoProfile -File ./release.ps1 `
+pwsh -NoProfile -NonInteractive -File ./release.ps1 `
   -AdbPath "C:\Android\platform-tools\adb.exe"
 ```
 
 如果已经有官方 APK，可跳过设备提取：
 
 ```powershell
-pwsh -NoProfile -File ./release.ps1 `
+pwsh -NoProfile -NonInteractive -File ./release.ps1 `
   -AdbPath "C:\Android\platform-tools\adb.exe" `
   -InputApk "D:\Downloads\Original.apk"
 ```
@@ -67,7 +67,7 @@ pwsh -NoProfile -File ./release.ps1 `
 不安装到设备：
 
 ```powershell
-pwsh -NoProfile -File ./run.ps1 `
+pwsh -NoProfile -NonInteractive -File ./run.ps1 `
   -InputApk "D:\Downloads\Original.apk" `
   -CreateKey
 ```
@@ -87,9 +87,9 @@ pwsh -NoProfile -File ./run.ps1 `
 插件处理以下响应：
 
 ```text
-api/MAdults/MonsterMAdults/{id} -> MAdults/{id}_gb.json
-api/MScenes/{id}                -> MScenes/{id}_gb.json
-api/Episode/MStory/{id}         -> Mstory/{id}_gb.json
+api/MAdults/MonsterMAdults/{MAdultId} -> MAdults/{mapped MSceneId}_gb.json
+api/MScenes/{id}                       -> MScenes/{id}_gb.json
+api/Episode/MStory/{id}                -> Mstory/{id}_gb.json
 ```
 
 本地词典路径：
@@ -98,9 +98,13 @@ api/Episode/MStory/{id}         -> Mstory/{id}_gb.json
 /sdcard/Android/data/<package>/files/UserData/OtogiTranslate/<type>/<id>_gb.json
 ```
 
-插件在本地词典不存在时尝试从 `otogitranslate` 下载对应文件。LemonLoader 0.5.7
-的 Mono 网络栈在部分模拟器上不稳定，因此本地词典是可靠路径。下载失败、JSON
-无效或钩子异常时保留游戏原始响应。
+插件优先读取本地词典。角色、世界和支线列表会通过 IL2CPP
+`UnityWebRequest` 异步预取缺少的词典并写入本地路径；临时网络错误最多尝试三次，
+HTTP 404 在本次进程中记为不可用。成人词典沿用翻译仓库的普通剧情 `MSceneId`
+文件名，插件使用角色列表中的 `MAdultId` → `MSceneId` 对应关系加载它；映射尚未建立
+时保留成人响应原文。无效的本地词典成功隔离为 `.invalid` 后，远端副本进入下载队列；
+隔离错误会写入日志并保留原文件。
+词典尚未就绪、下载失败或响应处理异常时，游戏继续使用原始响应。
 
 ## LLM UI 翻译
 
@@ -134,20 +138,45 @@ LogSeenText = false
 
 扫描器只把含平假名或片假名的文本加入队列。纯汉字保持不变，避免已经翻译的中文
 再次入队。翻译缓存写入同目录下的 `OtogiTranslate.cache.jsonl`。富文本标签、转义
-序列和占位符不一致的响应会被拒绝。图片、Sprite 和 Texture 中烘焙的文字无法由
-组件扫描器翻译。
+序列、实际换行和占位符保持一致时接受响应；其余文本保留原文并进入本次进程的跳过
+集合。`RetryCount` 表示首次请求之外的重试次数，可设为 `0` 到 `5`；408、429、5xx
+和传输错误使用退避，其他 4xx 会暂停本次进程的 LLM 请求。图片、Sprite 和 Texture
+中烘焙的文字由原始资源提供。
 
 ## 运行检查
 
-已有构建产物时可以单独运行：
+已有构建产物时，运行启动 smoke test：
 
 ```powershell
-pwsh -NoProfile -File ./test-loader.ps1 `
+pwsh -NoProfile -NonInteractive -File ./test-loader.ps1 `
   -AdbPath "C:\Android\platform-tools\adb.exe"
 ```
 
-检查会替换 `.prototype` 包的插件、字体和 Loader 日志，但保留登录状态、LLM 配置、
-翻译缓存和官方应用数据。实际剧情显示仍应人工确认一次。
+该检查覆盖安装、生产 DLL 中的 probe 排除、运行时文件哈希和所有 hook 的初始化。
+它会替换 `.prototype` 包的插件、字体和 Loader 日志，并保留登录状态、LLM 配置、
+翻译缓存和官方应用数据。
+
+真实游戏 E2E 使用 1920×1080 横屏、已登录且已解锁首个灰姑娘剧情的测试账号。
+设备 `[LLM]` 配置需启用，并提供与测试参数一致的端点、模型和有效 `ApiKey`。调用进程
+通过私有环境变量提供端点和模型：
+
+```powershell
+pwsh -NoProfile -NonInteractive -File ./test-e2e.ps1 `
+  -AdbPath "C:\Android\platform-tools\adb.exe" `
+  -ExpectedEndpoint $env:OTOGI_LLM_ENDPOINT `
+  -ExpectedModel $env:OTOGI_LLM_MODEL
+```
+
+E2E 从冷启动进入角色剧情，自远端预取 `MScenes/10001` 和 `MAdults/10001`，再将
+后者应用于 API 成人场景 `210011`。测试要求普通场景至少替换 100 项、成人场景至少
+替换 60 项，并验证 LLM 请求及实际 UI setter、Spine 材质补丁、字体文件哈希以及
+SurfaceFlinger 游戏图层的 60 Hz/60 FPS 状态和至少 58 FPS 的采样均值。截图、Loader
+日志、配置校验结果和帧统计写入已忽略的 `e2e/<timestamp>/`；端点、模型和凭据值保持
+在证据文件之外。测试结束时恢复完整的原有词典目录和 LLM 缓存。
+
+场景 gate 诊断源由 `SCENE_GATE_PROBE` 编译符号隔离；诊断构建显式启用该符号，
+标准 Docker 构建生成仅含生产功能的 DLL。smoke test 同时拒绝包含 probe 方法名的
+生产 DLL。
 
 ## 兼容性与分发
 
