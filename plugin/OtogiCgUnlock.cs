@@ -86,6 +86,14 @@ namespace OtogiCgUnlock
             return folder + "/" + id + ".json";
         }
 
+        internal static bool KeepRememberedStatus(
+            string storedUrl, int storedCode, string incomingUrl, int incomingCode)
+        {
+            return storedUrl == incomingUrl &&
+                (storedCode == 400 || storedCode == 404) &&
+                incomingCode == 200;
+        }
+
         internal static bool TryParseSceneUrl(string url, out string folder, out string id)
         {
             folder = null;
@@ -257,6 +265,14 @@ namespace OtogiCgUnlock
                     "https://game.test/api/Episode/CharacterStory", 400, true, true) !=
                     SceneResponseAction.Original)
                 throw new InvalidOperationException("substitute decision self-check failed");
+
+            if (!UnlockLogic.KeepRememberedStatus(
+                    adultUrl, 404, adultUrl, 200) ||
+                UnlockLogic.KeepRememberedStatus(
+                    adultUrl, 404, adultUrl + "/x", 200) ||
+                UnlockLogic.KeepRememberedStatus(adultUrl, 200, adultUrl, 200) ||
+                UnlockLogic.KeepRememberedStatus(adultUrl, 404, adultUrl, 404))
+                throw new InvalidOperationException("remembered status self-check failed");
 
             var paths = UnlockLogic.ExtractPrefetchPaths(episodeJson);
             if (paths.Length != 3 ||
@@ -643,6 +659,11 @@ namespace OtogiCgUnlock
             }
             lock (QueueLock)
             {
+                RememberedStatus previous;
+                if (_originalStatus.TryGetValue(instance, out previous) &&
+                    UnlockLogic.KeepRememberedStatus(
+                        previous.Url, previous.Code, url, code))
+                    return;
                 _originalStatus[instance] = new RememberedStatus
                 {
                     Url = url,
