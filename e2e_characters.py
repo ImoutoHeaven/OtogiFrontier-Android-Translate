@@ -108,18 +108,18 @@ def open_unowned_row():
     # Slot 2 (Vermelho) episode list is a live 200; locked adult rows 400.
     tap(430, 310, 6)
     screenshot("05-episode-list")
-    for y in (220, 380, 540, 700):
-        tap(1700, y, 6)
-        text = loader_log()
-        screenshot("05-unowned")
-        if "hook-failed" in text or "response-error" in text:
-            raise RuntimeError("plugin error in log")
-        if "[OtogiCgUnlock] sub " in text and (
-                "originalStatus=400" in text or "originalStatus=404" in text):
-            return text
-        tap(150, 1020, 2)
+    wait_log("downloaded relative=scenes/", 60)
+    tap(1700, 220, 8)
+    screenshot("05-unowned")
+    text = loader_log()
+    if "hook-failed" in text or "response-error" in text:
+        raise RuntimeError("plugin error in log")
+    if re.search(
+            r"\[OtogiCgUnlock\] sub url=/api/(MAdults/MonsterMAdults|MScenes)/\d+ originalStatus=40[04]",
+            text):
+        return text
     raise RuntimeError(
-        "locked-row substitute originalStatus=400/404 missing:\n" + loader_log()[-2000:])
+        "locked-row substitute originalStatus=400/404 missing:\n" + text[-2000:])
 
 
 def main():

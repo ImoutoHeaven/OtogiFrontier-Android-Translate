@@ -375,9 +375,15 @@ namespace OtogiCgUnlock
             new HashSet<string>(StringComparer.Ordinal);
         private static readonly Dictionary<string, int> Attempts =
             new Dictionary<string, int>(StringComparer.Ordinal);
-        // ponytail: process-lifetime response map; drop entries if hook churn grows
-        private static readonly Dictionary<IntPtr, int> _originalStatus =
-            new Dictionary<IntPtr, int>();
+        private sealed class RememberedStatus
+        {
+            internal string Url;
+            internal int Code;
+        }
+
+        // ponytail: keyed by response pointer + URL; overwrite on each native status
+        private static readonly Dictionary<IntPtr, RememberedStatus> _originalStatus =
+            new Dictionary<IntPtr, RememberedStatus>();
 
         private static ClassGetMethodFromName _classGetMethod;
         private static ClassGetParent _classGetParent;
@@ -612,25 +618,36 @@ namespace OtogiCgUnlock
             throw new MissingMethodException(name);
         }
 
-        internal static int OriginalHttpStatus(IntPtr instance)
+        internal static int OriginalHttpStatus(IntPtr instance, string url)
         {
             lock (QueueLock)
             {
-                int remembered;
-                if (_originalStatus.TryGetValue(instance, out remembered))
-                    return remembered;
+                RememberedStatus remembered;
+                if (_originalStatus.TryGetValue(instance, out remembered) &&
+                    remembered.Url == url)
+                    return remembered.Code;
             }
             return Marshal.ReadInt32(instance, 0x18);
         }
 
         private static void RememberStatus(IntPtr instance, int code)
         {
-            if (code != 400 && code != 404)
+            string url;
+            try
+            {
+                url = GetResponseUrl(instance);
+            }
+            catch
+            {
                 return;
+            }
             lock (QueueLock)
             {
-                if (!_originalStatus.ContainsKey(instance))
-                    _originalStatus[instance] = code;
+                _originalStatus[instance] = new RememberedStatus
+                {
+                    Url = url,
+                    Code = code
+                };
             }
         }
 
@@ -656,11 +673,17 @@ namespace OtogiCgUnlock
 
         private static bool GetIsSuccess(IntPtr instance, IntPtr methodInfo)
         {
-            var original = OriginalHttpStatus(instance);
-            if ((original == 400 || original == 404) && HasSubstitute(instance))
+            try
             {
-                Marshal.WriteInt32(instance, 0x18, 200);
-                return true;
+                var original = OriginalHttpStatus(instance, GetResponseUrl(instance));
+                if ((original == 400 || original == 404) && HasSubstitute(instance))
+                {
+                    Marshal.WriteInt32(instance, 0x18, 200);
+                    return true;
+                }
+            }
+            catch
+            {
             }
             return _originalIsSuccess(instance, methodInfo);
         }
