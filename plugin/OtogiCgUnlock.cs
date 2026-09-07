@@ -647,7 +647,10 @@ namespace OtogiCgUnlock
                     remembered.Url == url)
                     return remembered.Code;
             }
-            return Marshal.ReadInt32(instance, 0x18);
+            var field = Marshal.ReadInt32(instance, 0x18);
+            if (field == 400 || field == 404)
+                RememberStatus(instance, field, false);
+            return field;
         }
 
         private static void RememberStatus(IntPtr instance, int code, bool fromSetter)
