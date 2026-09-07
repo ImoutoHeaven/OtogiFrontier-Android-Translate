@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$InputApk = "input/Original.apk",
+    [string]$InputApk = $(if ($env:OTOGI_INPUT_APK) { $env:OTOGI_INPUT_APK } else { "input/Original.apk" }),
     [string]$OutputApk = "Original.prototype-signed.apk",
     [string]$PackageName = "jp.co.dmm.dmmgames.kms.prototype",
     [string]$Image = "otogi-apk-patcher:prototype",

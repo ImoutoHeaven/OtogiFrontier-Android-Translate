@@ -1,8 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$Serial = "127.0.0.1:5555",
-    [string]$AdbPath = "adb",
-    [string]$InputApk,
+    [string]$Serial = $(if ($env:ANDROID_SERIAL) { $env:ANDROID_SERIAL } else { "127.0.0.1:5555" }),
+    [string]$AdbPath = $(if ($env:OTOGI_ADB) { $env:OTOGI_ADB } else { "adb" }),
+    [string]$InputApk = $env:OTOGI_INPUT_APK,
     [switch]$CreateKey
 )
 

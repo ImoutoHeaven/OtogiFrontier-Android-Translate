@@ -27,48 +27,41 @@ id 合并进 `/api/Episode/CharacterStory`。静止画、语音和 BGM 从官方
 - Windows 10/11
 - PowerShell 7（`pwsh`）
 - 可用的 Docker daemon
-- 安装检查所需的 `adb`
+- `OTOGI_ADB` 或 PATH 中的 `adb`
+- `ANDROID_SERIAL`，默认 `127.0.0.1:5555`
+- 可选 `OTOGI_INPUT_APK` 指向官方单体 APK
 - 支持 ARM64 native bridge 的 Android 模拟器
 - 包名为 `jp.co.dmm.dmmgames.kms`、签名匹配项目内固定摘要且包含
   `lib/arm64-v8a/libil2cpp.so` 的 DMM 单体 APK
-
-默认 ADB serial 为 `127.0.0.1:5555`。`-Serial` 可选择其他设备。
 
 ## 构建、安装和检查
 
 在模拟器的 DMM GAMES STORE 中更新官方版。首次构建运行：
 
 ```powershell
-pwsh -NoProfile -NonInteractive -File ./release.ps1 `
-  -AdbPath "C:\Android\platform-tools\adb.exe" `
-  -CreateKey
+pwsh -NoProfile -NonInteractive -File ./release.ps1 -CreateKey
 ```
 
 后续更新复用 `keys/otogi-dev.keystore`：
 
 ```powershell
-pwsh -NoProfile -NonInteractive -File ./release.ps1 `
-  -AdbPath "C:\Android\platform-tools\adb.exe"
+pwsh -NoProfile -NonInteractive -File ./release.ps1
 ```
 
 `release.ps1` 从设备提取官方 APK，调用 Docker 构建并签名安装包，覆盖安装 prototype
 包，刷新插件和字体，再执行运行时 smoke test。成功以
 `PASS source verification, build, install, and runtime smoke test` 结束。
 
-已有官方 APK 时可直接指定输入：
+已有官方 APK 时设置 `OTOGI_INPUT_APK` 后运行：
 
 ```powershell
-pwsh -NoProfile -NonInteractive -File ./release.ps1 `
-  -AdbPath "C:\Android\platform-tools\adb.exe" `
-  -InputApk "D:\Downloads\Original.apk"
+pwsh -NoProfile -NonInteractive -File ./release.ps1
 ```
 
-只生成产物时运行：
+只生成产物时设置 `OTOGI_INPUT_APK` 后运行：
 
 ```powershell
-pwsh -NoProfile -NonInteractive -File ./run.ps1 `
-  -InputApk "D:\Downloads\Original.apk" `
-  -CreateKey
+pwsh -NoProfile -NonInteractive -File ./run.ps1 -CreateKey
 ```
 
 `run.ps1` 使用临时 `docker run --rm` 容器。输入和 payload 以只读方式挂载，输出仅写入
@@ -185,8 +178,7 @@ HTTP。`ApiKey` 以明文保存在应用专属目录。
 ### Smoke test
 
 ```powershell
-pwsh -NoProfile -NonInteractive -File ./test-loader.ps1 `
-  -AdbPath "C:\Android\platform-tools\adb.exe"
+pwsh -NoProfile -NonInteractive -File ./test-loader.ps1
 ```
 
 该测试安装 `out/` 中的 APK，核对设备上 `OtogiTranslate.dll` 和字体哈希，并要求
@@ -216,7 +208,6 @@ E2E 使用以下固定前置条件：
 
 ```powershell
 pwsh -NoProfile -NonInteractive -File ./test-e2e.ps1 `
-  -AdbPath "C:\Android\platform-tools\adb.exe" `
   -ExpectedEndpoint $env:OTOGI_LLM_ENDPOINT `
   -ExpectedModel $env:OTOGI_LLM_MODEL
 ```

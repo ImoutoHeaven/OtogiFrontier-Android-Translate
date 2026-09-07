@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Device E2E: empty cache, GitHub fetch, character-story merge, unowned 400 substitute."""
+import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-ADB = r"C:\Users\Eden\otogifrontier\platform_tools\adb.exe"
-SERIAL = "127.0.0.1:5555"
+ADB = os.environ.get("OTOGI_ADB") or shutil.which("adb")
+if not ADB:
+    raise SystemExit("adb not found; set OTOGI_ADB or put adb on PATH")
+SERIAL = os.environ.get("ANDROID_SERIAL", "127.0.0.1:5555")
 PKG = "jp.co.dmm.dmmgames.kms.prototype"
 FILES = f"/sdcard/Android/data/{PKG}/files"
 LOG = f"{FILES}/melonloader/etc/Latest.log"
