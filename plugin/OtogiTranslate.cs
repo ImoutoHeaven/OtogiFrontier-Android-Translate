@@ -1443,13 +1443,11 @@ namespace OtogiTranslate
             var result = _original(instance, methodInfo);
             if (Interlocked.Exchange(ref _hitLogged, 1) == 0)
                 MelonLogger.Msg("[OtogiTranslate] getter-hit");
-            if (result == IntPtr.Zero)
-                return result;
 
             try
             {
                 var responseUrl = GetResponseUrl(instance);
-                var originalJson = ToManagedString(result);
+                var originalJson = ToManagedString(result) ?? "";
                 string rewritten;
                 var originalStatus = OtogiCgUnlock.OtogiCgUnlockRuntime.OriginalHttpStatus(
                     instance, responseUrl);
@@ -1461,6 +1459,8 @@ namespace OtogiTranslate
                     if (originalStatus == 400 || originalStatus == 404)
                         Marshal.WriteInt32(instance, 0x18, 200);
                 }
+                if (result == IntPtr.Zero)
+                    return result;
                 QueueEpisodeDictionaries(responseUrl, originalJson);
                 string type;
                 string id;
