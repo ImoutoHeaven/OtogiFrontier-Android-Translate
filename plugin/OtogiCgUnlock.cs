@@ -87,8 +87,10 @@ namespace OtogiCgUnlock
         }
 
         internal static bool KeepRememberedStatus(
-            string storedUrl, int storedCode, string incomingUrl, int incomingCode)
+            string storedUrl, int storedCode, string incomingUrl, int incomingCode, bool fromSetter)
         {
+            if (fromSetter)
+                return false;
             return storedUrl == incomingUrl &&
                 (storedCode == 400 || storedCode == 404) &&
                 incomingCode == 200;
@@ -267,11 +269,13 @@ namespace OtogiCgUnlock
                 throw new InvalidOperationException("substitute decision self-check failed");
 
             if (!UnlockLogic.KeepRememberedStatus(
-                    adultUrl, 404, adultUrl, 200) ||
+                    adultUrl, 404, adultUrl, 200, false) ||
                 UnlockLogic.KeepRememberedStatus(
-                    adultUrl, 404, adultUrl + "/x", 200) ||
-                UnlockLogic.KeepRememberedStatus(adultUrl, 200, adultUrl, 200) ||
-                UnlockLogic.KeepRememberedStatus(adultUrl, 404, adultUrl, 404))
+                    adultUrl, 404, adultUrl, 200, true) ||
+                UnlockLogic.KeepRememberedStatus(
+                    adultUrl, 404, adultUrl + "/x", 200, false) ||
+                UnlockLogic.KeepRememberedStatus(adultUrl, 200, adultUrl, 200, false) ||
+                UnlockLogic.KeepRememberedStatus(adultUrl, 404, adultUrl, 404, false))
                 throw new InvalidOperationException("remembered status self-check failed");
 
             var paths = UnlockLogic.ExtractPrefetchPaths(episodeJson);
@@ -646,7 +650,7 @@ namespace OtogiCgUnlock
             return Marshal.ReadInt32(instance, 0x18);
         }
 
-        private static void RememberStatus(IntPtr instance, int code)
+        private static void RememberStatus(IntPtr instance, int code, bool fromSetter)
         {
             string url;
             try
@@ -662,7 +666,7 @@ namespace OtogiCgUnlock
                 RememberedStatus previous;
                 if (_originalStatus.TryGetValue(instance, out previous) &&
                     UnlockLogic.KeepRememberedStatus(
-                        previous.Url, previous.Code, url, code))
+                        previous.Url, previous.Code, url, code, fromSetter))
                     return;
                 _originalStatus[instance] = new RememberedStatus
                 {
@@ -675,7 +679,7 @@ namespace OtogiCgUnlock
         private static int GetStatusCode(IntPtr instance, IntPtr methodInfo)
         {
             var code = _originalStatusCode(instance, methodInfo);
-            RememberStatus(instance, code);
+            RememberStatus(instance, code, false);
             if ((code == 400 || code == 404) && HasSubstitute(instance))
             {
                 Marshal.WriteInt32(instance, 0x18, 200);
@@ -686,7 +690,7 @@ namespace OtogiCgUnlock
 
         private static void SetStatusCode(IntPtr instance, int value, IntPtr methodInfo)
         {
-            RememberStatus(instance, value);
+            RememberStatus(instance, value, true);
             if ((value == 400 || value == 404) && HasSubstitute(instance))
                 value = 200;
             _originalSetStatusCode(instance, value, methodInfo);
