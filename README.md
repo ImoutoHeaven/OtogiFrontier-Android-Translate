@@ -13,9 +13,10 @@ LemonLoader 安装包。目标包名为 `jp.co.dmm.dmmgames.kms.prototype`；编
 - 将 Spine `SkeletonMosaic` 材质的 `_BlockSize` 设为 `0.001`。
 - 将游戏字体请求重定向到 Noto Sans CJK SC，并随 APK 预置同一字体。
 - `OtogiTranslate.dll` 同时提供角色剧情、成人与场景 JSON 解锁：HTTP 400/404
-  时替换 `UserData/OtogiCgUnlock` 缓存，缺文件时从 GitHub raw 下载。
+  时用 `UserData/OtogiCgUnlock` 缓存替换响应；缺文件时按 `OtogiCgUnlock.cfg` 的
+  `Root` 下载（默认 GitHub raw）。
 
-剧情与 UI 翻译处理游戏已经返回的文本。同一 DLL 在
+剧情与 UI 翻译替换游戏响应和界面中的日文。同一 DLL 在
 `/api/MAdults/MonsterMAdults/{id}`、`/api/MScenes/{id}`、`/api/episode/monsters/{id}`、
 `/api/episode/spirits/{id}` 的 400/404 上使用本地缓存，并把 `characters.json` 中的角色
 id 合并进 `/api/Episode/CharacterStory`。静止画、语音和 BGM 从官方 CDN 加载。好感度与
@@ -105,10 +106,10 @@ api/Episode/MStory/{MStoryId}             -> Mstory/{MStoryId}_gb.json
 本地有效词典优先。插件从角色、世界和支线列表预取缺少的词典，并通过 IL2CPP
 `UnityWebRequest` 写入设备目录。传输错误、HTTP 408、429 和 5xx 最多尝试三次；HTTP
 404 在当前进程内标记为不可用。无效本地文件成功移动为 `.invalid` 后进入远端下载队列。
-词典仍在下载、下载失败或响应处理失败时，原始游戏响应直接进入后续流程。
+有效词典命中后替换响应；下载中或失败时沿用游戏原文。
 
 成人 API 使用 `MAdultId`，翻译仓库使用普通剧情的 `MSceneId`。插件从角色剧情列表建立
-`MAdultId -> MSceneId` 映射；映射就绪后加载成人词典，映射待建立时保留原始成人响应。
+`MAdultId -> MSceneId` 映射，映射就绪后加载成人词典。
 
 ## 角色剧情解锁
 
@@ -133,11 +134,13 @@ api/Episode/MStory/{MStoryId}             -> Mstory/{MStoryId}_gb.json
 Root = https://raw.githubusercontent.com/ImoutoHeaven/otogi-scenes/refs/heads/main
 ```
 
-`Root` 为空时只读本地缓存。缺文件时 GET `{Root}/adults/{id}.json`、`{Root}/scenes/{id}.json`、
-`{Root}/episodes/{id}.json` 或 `{Root}/characters.json`。传输使用 IL2CPP `UnityWebRequest`：
-同一时间一个请求、30 秒超时、HTTP 404 在当前进程内记住、408/429/5xx 最多三次。启动时若
-缺少 `characters.json` 则加入下载队列；剧情列表中的非 0 `MAdultId` / `MSceneId` 会预取对应
-JSON。
+有 `Root` 时，缺文件则 GET `{Root}/adults/{id}.json`、`{Root}/scenes/{id}.json`、
+`{Root}/episodes/{id}.json` 或 `{Root}/characters.json`；空 `Root` 只读本地缓存。JSON 形状见
+[`ImoutoHeaven/otogi-scenes`](https://github.com/ImoutoHeaven/otogi-scenes)。传输使用 IL2CPP
+`UnityWebRequest`：同一时间一个请求、30 秒超时、HTTP 404 在当前进程内记住、408/429/5xx
+最多三次。启动时若缺少 `characters.json` 则加入下载队列；剧情列表中的非 0 `MAdultId` /
+`MSceneId` 会预取对应 JSON。`EpisodeScenarioCell.SetupCell` 将条目标为可观看；本地已有对应
+成人 JSON 时，`CharacterStoryScene` 按成人演出进入。
 
 ## LLM UI 翻译
 
@@ -166,12 +169,13 @@ LogSeenText = false
 ```
 
 启用 LLM 时设置 `Enable = true`，填写 `Endpoint`、`Model` 和接口所需的 `ApiKey`，再重启
-游戏。远程接口使用 HTTPS；loopback 与 Android Emulator 宿主地址 `10.0.2.2` 也可使用 HTTP。`ApiKey` 以明文保存在应用专属目录中，提交与共享范围应排除
-该配置文件。
+游戏。允许的 LLM 端点为 HTTPS，以及 loopback 与 Android Emulator 宿主地址 `10.0.2.2` 的
+HTTP。`ApiKey` 以明文保存在应用专属目录。
 
 扫描器处理 `TMPro.TMP_Text` 和 `UnityEngine.UI.Text` 中长度为 1–1000 个字符且包含假名的
-文本。缓存位于同目录的 `OtogiTranslate.cache.jsonl`，最多加载 10000 项。有效响应保留
-富文本标签、转义序列、占位符和换行；其他响应使当前文本在本次进程内继续显示原文。
+文本。缓存位于同目录的 `OtogiTranslate.cache.jsonl`，最多加载 10000 项。通过校验的译文
+保留富文本标签、转义序列、占位符和换行并替换当前文本；未通过校验的条目在本次进程内
+继续显示原文。
 `RetryCount` 表示首次请求之外的重试次数，范围为 0–5。408、429、5xx 和传输错误使用
 退避；其他 4xx 暂停当前进程的 LLM 队列。图片、Sprite 和 Texture 中的文字沿用资源
 内容。
@@ -187,7 +191,8 @@ pwsh -NoProfile -NonInteractive -File ./test-loader.ps1 `
 
 该测试安装 `out/` 中的 APK，核对设备上 `OtogiTranslate.dll` 和字体哈希，并要求
 LemonLoader assembly、剧情响应、60 FPS、马赛克、字体、词典传输、运行时驱动 hook 以及
-`[OtogiCgUnlock] installed` 完成初始化。登录状态、LLM 配置、翻译缓存和官方包数据保持原状。
+`[OtogiCgUnlock] installed` 完成初始化。测试刷新 Plugins 与字体；登录、LLM 配置、翻译缓存
+和官方包数据沿用设备现有文件。
 
 ### 角色剧情远程 E2E
 
@@ -226,28 +231,26 @@ pwsh -NoProfile -NonInteractive -File ./test-e2e.ps1 `
 - 设备字体哈希匹配 payload
 - SurfaceFlinger 游戏图层为 60 Hz/60 FPS，10 秒采样至少 500 帧且平均帧率至少 58
 
-截图、Loader 日志、配置校验结果和帧统计写入 `e2e/<timestamp>/`；端点、模型和凭据值保持
-在证据文件之外。测试完整备份词典目录和 LLM 缓存，并在结束阶段恢复；成功以
-`PASS real game E2E` 结束。
+截图、Loader 日志、配置校验结果和帧统计写入 `e2e/<timestamp>/`。测试完整备份词典目录和
+LLM 缓存，并在结束阶段恢复；成功以 `PASS real game E2E` 结束。
 
 ## 兼容边界
 
-运行验证覆盖 `OtogiTranslate` 的 native IL2CPP hooks。LemonLoader 0.5.7 在该游戏中加载
-`UnityEngine.CoreModule` support module 时会记录 `TypeLoadException`；传统 managed Mods
-仍处于待验证范围。Prototype manifest 包含 `android:debuggable=true` 和
-`MANAGE_EXTERNAL_STORAGE`，适用环境为专用测试设备。
+运行验证覆盖 `OtogiTranslate` 的 native IL2CPP hooks。LemonLoader 0.5.7 加载该游戏的
+`UnityEngine.CoreModule` support module 时会记录 `TypeLoadException`。Prototype manifest
+包含 `android:debuggable=true` 和 `MANAGE_EXTERNAL_STORAGE`，适用环境为专用测试设备。
 
 ## 组件、数据与许可
 
 构建使用固定版本的：
 
-- [`LemonLoader/MelonLoader_057`](https://github.com/LemonLoader/MelonLoader_057)
-- [`Apktool`](https://github.com/iBotPeaches/Apktool)
-- [`MelonLoader.UnityDependencies`](https://github.com/LavaGang/MelonLoader.UnityDependencies)
+- [`LemonLoader/MelonLoader_057`](https://github.com/LemonLoader/MelonLoader_057) `0.2.0.1`
+- [`Apktool`](https://github.com/iBotPeaches/Apktool) `3.0.3`
+- [`MelonLoader.UnityDependencies`](https://github.com/LavaGang/MelonLoader.UnityDependencies) `2022.3.62`
 
 Loader payload 面向 ARM64 Android，x86_64 宿主通过模拟器 native bridge 执行。输出包使用
 本地开发密钥，适合个人测试。官方 APK、DMM 账号数据、签名密钥、LLM 凭据和完整翻译
-资源保存在各自的本地或上游位置。公开分发内容应限于有权发布的源码和资源。
+资源留在本地或上游。仓库公开内容为有权发布的源码和资源。
 
 字体 payload 为 Noto Sans CJK SC，许可见 [`LICENSES/OFL-1.1.txt`](LICENSES/OFL-1.1.txt)。
-游戏、商标和原始资源归各权利人所有。本仓库除第三方组件许可外未声明项目级开源许可。
+游戏、商标和原始资源归各权利人所有。第三方组件沿用各自许可。
