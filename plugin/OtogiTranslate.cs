@@ -535,6 +535,7 @@ namespace OtogiTranslate
                     Marshal.ReadIntPtr(_targetSlot), typeof(DataAsTextGetter));
 
                 MelonLogger.Msg("[OtogiTranslate] hook-installed");
+                OtogiCgUnlock.OtogiCgUnlockRuntime.Install();
 
                 try
                 {
@@ -837,6 +838,7 @@ namespace OtogiTranslate
             TickDictionaryQueue();
             TickLlmQueue();
             TickTmpScan();
+            OtogiCgUnlock.OtogiCgUnlockRuntime.Tick();
         }
 
         private static void TickDictionaryQueue()
@@ -1448,6 +1450,16 @@ namespace OtogiTranslate
             {
                 var responseUrl = GetResponseUrl(instance);
                 var originalJson = ToManagedString(result);
+                string rewritten;
+                var originalStatus = Marshal.ReadInt32(instance, 0x18);
+                if (OtogiCgUnlock.OtogiCgUnlockRuntime.TryRewrite(
+                    responseUrl, originalJson, originalStatus, out rewritten))
+                {
+                    originalJson = rewritten;
+                    result = ToIl2CppString(rewritten);
+                    if (originalStatus == 400 || originalStatus == 404)
+                        Marshal.WriteInt32(instance, 0x18, 200);
+                }
                 QueueEpisodeDictionaries(responseUrl, originalJson);
                 string type;
                 string id;

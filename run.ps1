@@ -63,5 +63,4 @@ if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $pluginPath -PathType Leaf)) {
     throw "Container succeeded without producing $pluginPath"
 }
-
 Write-Host "Verified artifacts: $outputPath, $pluginPath"

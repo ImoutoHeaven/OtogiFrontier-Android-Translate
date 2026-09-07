@@ -12,9 +12,14 @@ LemonLoader 安装包。目标包名为 `jp.co.dmm.dmmgames.kms.prototype`；编
 - 将 Unity 目标帧率固定为 60 FPS。
 - 将 Spine `SkeletonMosaic` 材质的 `_BlockSize` 设为 `0.001`。
 - 将游戏字体请求重定向到 Noto Sans CJK SC，并随 APK 预置同一字体。
+- `OtogiTranslate.dll` 同时提供角色剧情、成人与场景 JSON 解锁：HTTP 400/404
+  时替换 `UserData/OtogiCgUnlock` 缓存，缺文件时从 GitHub raw 下载。
 
-剧情与 UI 翻译仅处理游戏已经返回的内容。场景可见性、角色持有状态、好感度和账号权限
-继续由游戏及其服务端处理。
+剧情与 UI 翻译处理游戏已经返回的文本。同一 DLL 在
+`/api/MAdults/MonsterMAdults/{id}`、`/api/MScenes/{id}`、`/api/episode/monsters/{id}`、
+`/api/episode/spirits/{id}` 的 400/404 上使用本地缓存，并把 `characters.json` 中的角色
+id 合并进 `/api/Episode/CharacterStory`。静止画、语音和 BGM 从官方 CDN 加载。好感度与
+账号权限由游戏服务端处理。
 
 ## 环境
 
@@ -105,6 +110,35 @@ api/Episode/MStory/{MStoryId}             -> Mstory/{MStoryId}_gb.json
 成人 API 使用 `MAdultId`，翻译仓库使用普通剧情的 `MSceneId`。插件从角色剧情列表建立
 `MAdultId -> MSceneId` 映射；映射就绪后加载成人词典，映射待建立时保留原始成人响应。
 
+## 角色剧情解锁
+
+解锁逻辑编进 `OtogiTranslate.dll`，随 Lemon `copyToData/Plugins` 一起下发。
+设备缓存：
+
+```text
+/sdcard/Android/data/<package>/files/UserData/OtogiCgUnlock/adults/{id}.json
+/sdcard/Android/data/<package>/files/UserData/OtogiCgUnlock/scenes/{id}.json
+/sdcard/Android/data/<package>/files/UserData/OtogiCgUnlock/episodes/{id}.json
+/sdcard/Android/data/<package>/files/UserData/OtogiCgUnlock/characters.json
+```
+
+首次启动在游戏目录创建：
+
+```text
+/sdcard/Android/data/<package>/files/OtogiCgUnlock.cfg
+```
+
+```ini
+[Remote]
+Root = https://raw.githubusercontent.com/ImoutoHeaven/otogi-scenes/refs/heads/main
+```
+
+`Root` 为空时只读本地缓存。缺文件时 GET `{Root}/adults/{id}.json`、`{Root}/scenes/{id}.json`、
+`{Root}/episodes/{id}.json` 或 `{Root}/characters.json`。传输使用 IL2CPP `UnityWebRequest`：
+同一时间一个请求、30 秒超时、HTTP 404 在当前进程内记住、408/429/5xx 最多三次。启动时若
+缺少 `characters.json` 则加入下载队列；剧情列表中的非 0 `MAdultId` / `MSceneId` 会预取对应
+JSON。
+
 ## LLM UI 翻译
 
 首次启动在设备创建：
@@ -151,9 +185,19 @@ pwsh -NoProfile -NonInteractive -File ./test-loader.ps1 `
   -AdbPath "C:\Android\platform-tools\adb.exe"
 ```
 
-该测试安装 `out/` 中的 APK，核对设备插件和字体哈希，并要求 LemonLoader assembly、
-剧情响应、60 FPS、马赛克、字体、词典传输和运行时驱动 hook 完成初始化。登录状态、LLM
-配置、翻译缓存和官方包数据保持原状。
+该测试安装 `out/` 中的 APK，核对设备上 `OtogiTranslate.dll` 和字体哈希，并要求
+LemonLoader assembly、剧情响应、60 FPS、马赛克、字体、词典传输、运行时驱动 hook 以及
+`[OtogiCgUnlock] installed` 完成初始化。登录状态、LLM 配置、翻译缓存和官方包数据保持原状。
+
+### 角色剧情远程 E2E
+
+```powershell
+python ./e2e_characters.py
+```
+
+冷启动清空 `UserData/OtogiCgUnlock`，从 GitHub raw 拉取 `characters.json`，进入角色剧情页后
+`characters-merged monsters>=975 spirits>=149`，锁定条目出现 `originalStatus=400` 或 `404` 替换。
+截图写入 `out/e2e/`。前置：1920×1080 横屏、已登录测试账号、设备能访问 GitHub raw。
 
 ### 真实游戏 E2E
 

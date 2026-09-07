@@ -43,7 +43,7 @@ if ($LASTEXITCODE -ne 0) { throw "Failed to enable LemonLoader emulator mode" }
 
 # Refresh build-owned files without deleting login, config, or translation cache.
 & $adb -s $Serial shell am force-stop $PackageName
-& $adb -s $Serial shell "rm -f $externalFiles/Plugins/OtogiTranslate.dll $externalFiles/Assets/font $externalFiles/Assets/font.md5 $loaderLog"
+& $adb -s $Serial shell "rm -f $externalFiles/Plugins/OtogiTranslate.dll $externalFiles/Plugins/OtogiCgUnlock.dll $externalFiles/Assets/font $externalFiles/Assets/font.md5 $loaderLog"
 if ($LASTEXITCODE -ne 0) { throw "Failed to remove stale runtime assets" }
 & $adb -s $Serial shell monkey -p $PackageName -c android.intent.category.LAUNCHER 1 | Out-Null
 
@@ -75,9 +75,11 @@ do {
     $loaderOutput = (& $adb -s $Serial shell "cat $loaderLog" 2>$null) -join "`n"
 } until (
     $loaderOutput.Contains("[OtogiTranslate] hook-failed") -or
+    $loaderOutput.Contains("[OtogiCgUnlock] hook-failed") -or
     $loaderOutput.Contains("Failed to Invoke PreStart") -or
     $loaderOutput.Contains("[OtogiTranslate] runtime-init-failed") -or
     ($loaderOutput.Contains("[OtogiTranslate] hook-installed") -and
+        $loaderOutput.Contains("[OtogiCgUnlock] installed") -and
         $loaderOutput.Contains("Assembly is up to date. No Generation Needed.") -and
         $loaderOutput.Contains("[OtogiTranslate] getter-hit") -and
         $loaderOutput.Contains("[OtogiTranslate] framerate-installed fps=60") -and
@@ -90,8 +92,9 @@ do {
 )
 
 $diagnostic = (& $adb -s $Serial logcat -d -v brief) |
-    Select-String -Pattern "MelonLoader|libBootstrap|libmonosgen|Fatal signal|FATAL EXCEPTION|OtogiTranslate"
+    Select-String -Pattern "MelonLoader|libBootstrap|libmonosgen|Fatal signal|FATAL EXCEPTION|OtogiTranslate|OtogiCgUnlock"
 if (-not $loaderOutput.Contains("[OtogiTranslate] hook-installed") -or
+    -not $loaderOutput.Contains("[OtogiCgUnlock] installed") -or
     -not $loaderOutput.Contains("Assembly is up to date. No Generation Needed.") -or
     -not $loaderOutput.Contains("[OtogiTranslate] getter-hit") -or
     -not $loaderOutput.Contains("[OtogiTranslate] framerate-installed fps=60") -or
@@ -101,10 +104,11 @@ if (-not $loaderOutput.Contains("[OtogiTranslate] hook-installed") -or
     -not $loaderOutput.Contains("[OtogiTranslate] dictionary-transport-installed") -or
     -not $loaderOutput.Contains("[OtogiTranslate] runtime-driver-installed") -or
     $loaderOutput.Contains("[OtogiTranslate] hook-failed") -or
+    $loaderOutput.Contains("[OtogiCgUnlock] hook-failed") -or
     $loaderOutput.Contains("[OtogiTranslate] runtime-init-failed") -or
     $loaderOutput.Contains("Failed to Invoke PreStart")) {
     $loaderOutput -split "`n" |
-        Select-String -Pattern "MelonLoader v|OtogiTranslate|Failed to Invoke PreStart" |
+        Select-String -Pattern "MelonLoader v|OtogiTranslate|OtogiCgUnlock|Failed to Invoke PreStart" |
         Select-Object -Last 40 | ForEach-Object { $_.Line }
     $diagnostic | Select-Object -Last 40 | ForEach-Object { $_.Line }
     throw "LemonLoader or OtogiTranslate runtime check failed"
