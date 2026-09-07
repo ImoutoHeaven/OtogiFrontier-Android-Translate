@@ -1451,7 +1451,7 @@ namespace OtogiTranslate
                 var responseUrl = GetResponseUrl(instance);
                 var originalJson = ToManagedString(result);
                 string rewritten;
-                var originalStatus = Marshal.ReadInt32(instance, 0x18);
+                var originalStatus = OtogiCgUnlock.OtogiCgUnlockRuntime.OriginalHttpStatus(instance);
                 if (OtogiCgUnlock.OtogiCgUnlockRuntime.TryRewrite(
                     responseUrl, originalJson, originalStatus, out rewritten))
                 {

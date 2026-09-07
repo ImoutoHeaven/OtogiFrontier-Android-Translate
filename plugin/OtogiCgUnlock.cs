@@ -375,6 +375,9 @@ namespace OtogiCgUnlock
             new HashSet<string>(StringComparer.Ordinal);
         private static readonly Dictionary<string, int> Attempts =
             new Dictionary<string, int>(StringComparer.Ordinal);
+        // ponytail: process-lifetime response map; drop entries if hook churn grows
+        private static readonly Dictionary<IntPtr, int> _originalStatus =
+            new Dictionary<IntPtr, int>();
 
         private static ClassGetMethodFromName _classGetMethod;
         private static ClassGetParent _classGetParent;
@@ -548,7 +551,8 @@ namespace OtogiCgUnlock
             try
             {
                 string merged;
-                if (TryMergeCharacterList(url, original, out merged))
+                if (originalStatus == 200 &&
+                    TryMergeCharacterList(url, original, out merged))
                 {
                     json = merged;
                     return true;
@@ -608,9 +612,32 @@ namespace OtogiCgUnlock
             throw new MissingMethodException(name);
         }
 
+        internal static int OriginalHttpStatus(IntPtr instance)
+        {
+            lock (QueueLock)
+            {
+                int remembered;
+                if (_originalStatus.TryGetValue(instance, out remembered))
+                    return remembered;
+            }
+            return Marshal.ReadInt32(instance, 0x18);
+        }
+
+        private static void RememberStatus(IntPtr instance, int code)
+        {
+            if (code != 400 && code != 404)
+                return;
+            lock (QueueLock)
+            {
+                if (!_originalStatus.ContainsKey(instance))
+                    _originalStatus[instance] = code;
+            }
+        }
+
         private static int GetStatusCode(IntPtr instance, IntPtr methodInfo)
         {
             var code = _originalStatusCode(instance, methodInfo);
+            RememberStatus(instance, code);
             if ((code == 400 || code == 404) && HasSubstitute(instance))
             {
                 Marshal.WriteInt32(instance, 0x18, 200);
@@ -621,6 +648,7 @@ namespace OtogiCgUnlock
 
         private static void SetStatusCode(IntPtr instance, int value, IntPtr methodInfo)
         {
+            RememberStatus(instance, value);
             if ((value == 400 || value == 404) && HasSubstitute(instance))
                 value = 200;
             _originalSetStatusCode(instance, value, methodInfo);
@@ -628,7 +656,8 @@ namespace OtogiCgUnlock
 
         private static bool GetIsSuccess(IntPtr instance, IntPtr methodInfo)
         {
-            if (HasSubstitute(instance))
+            var original = OriginalHttpStatus(instance);
+            if ((original == 400 || original == 404) && HasSubstitute(instance))
             {
                 Marshal.WriteInt32(instance, 0x18, 200);
                 return true;
@@ -653,22 +682,16 @@ namespace OtogiCgUnlock
                 var adultId = Marshal.ReadInt32(episodeViewModel, 0x30);
                 if (adultId != 0 &&
                     File.Exists(ScenePath("adults", adultId.ToString(CultureInfo.InvariantCulture))) &&
-                    !IsOrdinaryScene(episodeViewModel))
-                    isAdult = 1;
+                    Marshal.ReadByte(episodeViewModel, 0x20) != 0)
+                {
+                    var sceneId = Marshal.ReadInt32(episodeViewModel, 0x24);
+                    if (sceneId != 0 &&
+                        File.Exists(ScenePath(
+                            "adults", sceneId.ToString(CultureInfo.InvariantCulture))))
+                        isAdult = 1;
+                }
             }
             return _originalTransition(instance, isAdult, episodeViewModel, methodInfo);
-        }
-
-        private static bool IsOrdinaryScene(IntPtr episodeViewModel)
-        {
-            if (Marshal.ReadByte(episodeViewModel, 0x20) == 0)
-                return false;
-            var sceneId = Marshal.ReadInt32(episodeViewModel, 0x24);
-            if (sceneId == 0)
-                return false;
-            var id = sceneId.ToString(CultureInfo.InvariantCulture);
-            return File.Exists(ScenePath("scenes", id)) &&
-                !File.Exists(ScenePath("adults", id));
         }
 
         private static bool HasSubstitute(IntPtr response)
@@ -720,17 +743,7 @@ namespace OtogiCgUnlock
             if (url.IndexOf("/api/episode/monsters/", StringComparison.OrdinalIgnoreCase) < 0 &&
                 url.IndexOf("/api/episode/spirits/", StringComparison.OrdinalIgnoreCase) < 0)
                 return;
-            try
-            {
-                var paths = UnlockLogic.ExtractPrefetchPaths(json);
-                for (var i = 0; i < paths.Length; i++)
-                    QueueRemote(paths[i]);
-            }
-            catch (Exception exception)
-            {
-                if (Interlocked.Exchange(ref _prefetchErrorLogged, 1) == 0)
-                    MelonLogger.Warning("[OtogiCgUnlock] prefetch-error: " + exception.Message);
-            }
+            PrefetchEpisodePaths(json);
         }
 
         private static string ScenePath(string folder, string id)
@@ -874,7 +887,7 @@ namespace OtogiCgUnlock
                     relative,
                     json.Length));
                 if (relative.StartsWith("episodes/", StringComparison.OrdinalIgnoreCase))
-                    PrefetchDownloadedEpisode(json);
+                    PrefetchEpisodePaths(json);
             }
             catch (Exception exception)
             {
@@ -882,7 +895,7 @@ namespace OtogiCgUnlock
             }
         }
 
-        private static void PrefetchDownloadedEpisode(string json)
+        private static void PrefetchEpisodePaths(string json)
         {
             try
             {
