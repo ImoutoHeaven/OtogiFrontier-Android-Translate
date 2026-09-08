@@ -11,7 +11,8 @@ LemonLoader 安装包。目标包名为 `jp.co.dmm.dmmgames.kms.prototype`；编
 - 通过 OpenAI Chat Completions 兼容接口翻译运行时日文 UI 文本。
 - 将 Unity 目标帧率固定为 60 FPS。
 - 将 Spine `SkeletonMosaic` 材质的 `_BlockSize` 设为 `0.001`。
-- 将游戏字体请求重定向到 Noto Sans CJK SC，并随 APK 预置同一字体。
+- 将游戏 `/Assets/font` 请求改写为 `http://otogi-font.invalid/Assets/font`，BestHTTP
+  发送钩子读取 APK 预置的 Noto Sans CJK SC AssetBundle 作为响应。
 - `OtogiTranslate.dll` 同时提供角色剧情、成人与场景 JSON 解锁：HTTP 400/404
   时用 `UserData/OtogiCgUnlock` 缓存替换响应；缺文件时按 `OtogiCgUnlock.cfg` 的
   `Root` 下载（默认 GitHub raw）。

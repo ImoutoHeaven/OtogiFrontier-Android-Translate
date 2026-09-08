@@ -51,12 +51,22 @@ namespace OtogiTranslate
             return replacements == 0 ? originalJson : root.ToString(Formatting.None);
         }
 
+        internal const string LocalFontUrl = "http://otogi-font.invalid/Assets/font";
+
         internal static bool IsFontUrl(string url)
         {
             Uri uri;
             return Uri.TryCreate(url, UriKind.Absolute, out uri) &&
                 uri.AbsolutePath.TrimEnd('/').EndsWith(
                     "/Assets/font", StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static bool IsLocalFontUrl(string url)
+        {
+            Uri uri;
+            return Uri.TryCreate(url, UriKind.Absolute, out uri) &&
+                string.Equals(
+                    uri.Host, "otogi-font.invalid", StringComparison.OrdinalIgnoreCase);
         }
 
         private static int ReplaceStrings(JToken token, Dictionary<string, string> dictionary)
@@ -131,6 +141,9 @@ namespace OtogiTranslate
                 (string)parsed["nested"][1] != "未翻訳" ||
                 !TranslationLogic.IsFontUrl("https://example.test/Assets/font?v=1") ||
                 TranslationLogic.IsFontUrl("https://example.test/Assets/fonts") ||
+                !TranslationLogic.IsFontUrl(TranslationLogic.LocalFontUrl) ||
+                !TranslationLogic.IsLocalFontUrl(TranslationLogic.LocalFontUrl) ||
+                TranslationLogic.IsLocalFontUrl("https://example.test/Assets/font") ||
                 !runtimeConfig.Enable || runtimeConfig.RetryCount != 0 ||
                 runtimeConfig.MaxQueue != 1024 || runtimeConfig.ScanIntervalSeconds != 0.1 ||
                 !RuntimeTranslator.IsTranslationCandidate("こんにちは") ||
@@ -221,8 +234,8 @@ namespace OtogiTranslate
     {
         private const string RemoteRoot =
             "https://raw.githubusercontent.com/alex343425/otogitranslate/refs/heads/main";
-        private const string FontUrl =
-            "https://r2.ntr.best/font/otogi-font";
+        private const int HttpRequestFinished = 3;
+        private const int HttpRequestError = 4;
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate IntPtr DomainGet();
@@ -282,6 +295,9 @@ namespace OtogiTranslate
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void FieldGetValue(IntPtr instance, IntPtr field, IntPtr output);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void FieldSetValue(IntPtr instance, IntPtr field, IntPtr value);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate IntPtr RuntimeInvoke(
@@ -344,6 +360,9 @@ namespace OtogiTranslate
             IntPtr argument4,
             IntPtr methodInfo);
 
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate IntPtr HttpSendRequest(IntPtr request, IntPtr methodInfo);
+
         private static readonly object CacheLock = new object();
         private static readonly Dictionary<string, Dictionary<string, string>> Cache =
             new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
@@ -370,6 +389,7 @@ namespace OtogiTranslate
         private static ObjectGetClass _objectGetClass;
         private static ObjectNew _objectNew;
         private static FieldGetValue _fieldGetValue;
+        private static FieldSetValue _fieldSetValue;
         private static RuntimeInvoke _runtimeInvoke;
         private static StringLength _stringLength;
         private static StringChars _stringChars;
@@ -395,8 +415,20 @@ namespace OtogiTranslate
         private static HttpRequestConstructor _originalRequestConstructor;
         private static HttpRequestConstructor _requestConstructorDetour;
         private static IntPtr _requestConstructorTargetSlot;
+        private static HttpSendRequest _originalSendRequest;
+        private static HttpSendRequest _sendRequestDetour;
+        private static IntPtr _sendRequestTargetSlot;
         private static IntPtr _uriClass;
         private static IntPtr _uriConstructor;
+        private static IntPtr _uriGetHost;
+        private static IntPtr _httpRequestGetUri;
+        private static IntPtr _httpRequestCallCallback;
+        private static IntPtr _httpResponseClass;
+        private static IntPtr _httpResponseCtor;
+        private static IntPtr _fileReadAllBytes;
+        private static IntPtr _memoryStreamClass;
+        private static IntPtr _memoryStreamCtor;
+        private static IntPtr _streamDispose;
         private static IntPtr _tmpFindObjects;
         private static IntPtr _tmpGetText;
         private static IntPtr _tmpSetText;
@@ -429,6 +461,7 @@ namespace OtogiTranslate
         private static int _mosaicErrorLogged;
         private static int _fontRedirectLogged;
         private static int _fontRedirectErrorLogged;
+        private static int _fontLocalErrorLogged;
         private static int _tmpScanHitLogged;
         private static int _tmpScanErrorLogged;
         private static int _dictionaryPrefetchErrorLogged;
@@ -487,6 +520,8 @@ namespace OtogiTranslate
                     typeof(ObjectGetClass), "il2cpp_object_get_class");
                 _fieldGetValue = (FieldGetValue)il2cpp.GetExport(
                     typeof(FieldGetValue), "il2cpp_field_get_value");
+                _fieldSetValue = (FieldSetValue)il2cpp.GetExport(
+                    typeof(FieldSetValue), "il2cpp_field_set_value");
                 _runtimeInvoke = (RuntimeInvoke)il2cpp.GetExport(
                     typeof(RuntimeInvoke), "il2cpp_runtime_invoke");
                 _stringLength = (StringLength)il2cpp.GetExport(
@@ -513,6 +548,23 @@ namespace OtogiTranslate
                 _byteClass = classFromName(corlib, "System", "Byte");
                 if (_byteClass == IntPtr.Zero)
                     throw new InvalidOperationException("System.Byte was not found");
+                var fileClass = classFromName(corlib, "System.IO", "File");
+                var streamClass = classFromName(corlib, "System.IO", "Stream");
+                _memoryStreamClass = classFromName(corlib, "System.IO", "MemoryStream");
+                _fileReadAllBytes = fileClass == IntPtr.Zero
+                    ? IntPtr.Zero
+                    : FindMethod(fileClass, "ReadAllBytes", 1, "System.String");
+                _memoryStreamCtor = _memoryStreamClass == IntPtr.Zero
+                    ? IntPtr.Zero
+                    : FindMethod(_memoryStreamClass, ".ctor");
+                _streamDispose = streamClass == IntPtr.Zero
+                    ? IntPtr.Zero
+                    : FindMethod(streamClass, "Dispose");
+                if (_fileReadAllBytes == IntPtr.Zero ||
+                    _memoryStreamCtor == IntPtr.Zero ||
+                    _streamDispose == IntPtr.Zero)
+                    throw new InvalidOperationException(
+                        "System.IO File.ReadAllBytes/MemoryStream/Stream.Dispose was not found");
 
                 var assembly = assemblyOpen(domainGet(), "Assembly-CSharp-firstpass");
                 if (assembly == IntPtr.Zero)
@@ -521,6 +573,7 @@ namespace OtogiTranslate
                 var klass = classFromName(assemblyGetImage(assembly), "BestHTTP", "HTTPResponse");
                 if (klass == IntPtr.Zero)
                     throw new InvalidOperationException("BestHTTP.HTTPResponse was not found");
+                _httpResponseClass = klass;
 
                 var method = FindMethod(klass, "get_DataAsText");
                 var target = method == IntPtr.Zero ? IntPtr.Zero : Marshal.ReadIntPtr(method);
@@ -648,6 +701,23 @@ namespace OtogiTranslate
                         throw new InvalidOperationException("System.Uri was not found");
                     _uriConstructor = FindMethod(
                         _uriClass, ".ctor", 1, "System.String");
+                    _uriGetHost = FindMethod(_uriClass, "get_Host");
+                    _httpRequestGetUri = FindMethod(requestClass, "get_Uri");
+                    _httpRequestCallCallback = FindMethod(requestClass, "CallCallback");
+                    _httpResponseCtor = FindMethod(
+                        _httpResponseClass, ".ctor", 4, "BestHTTP.HTTPRequest");
+                    var manager = classFromName(
+                        assemblyGetImage(assembly), "BestHTTP", "HTTPManager");
+                    var sendRequest = manager == IntPtr.Zero
+                        ? IntPtr.Zero
+                        : FindMethod(
+                            manager, "SendRequest", 1, "BestHTTP.HTTPRequest");
+                    var sendRequestTarget = sendRequest == IntPtr.Zero
+                        ? IntPtr.Zero
+                        : Marshal.ReadIntPtr(sendRequest);
+                    if (sendRequestTarget == IntPtr.Zero)
+                        throw new InvalidOperationException(
+                            "BestHTTP.HTTPManager.SendRequest was not found");
 
                     _requestConstructorDetour = ConstructRequest;
                     _requestConstructorTargetSlot = Marshal.AllocHGlobal(IntPtr.Size);
@@ -661,6 +731,17 @@ namespace OtogiTranslate
                         Marshal.GetDelegateForFunctionPointer(
                             Marshal.ReadIntPtr(_requestConstructorTargetSlot),
                             typeof(HttpRequestConstructor));
+
+                    _sendRequestDetour = SendHttpRequest;
+                    _sendRequestTargetSlot = Marshal.AllocHGlobal(IntPtr.Size);
+                    Marshal.WriteIntPtr(_sendRequestTargetSlot, sendRequestTarget);
+                    MelonUtils.NativeHookAttach(
+                        _sendRequestTargetSlot,
+                        Marshal.GetFunctionPointerForDelegate(_sendRequestDetour));
+                    _originalSendRequest = (HttpSendRequest)
+                        Marshal.GetDelegateForFunctionPointer(
+                            Marshal.ReadIntPtr(_sendRequestTargetSlot),
+                            typeof(HttpSendRequest));
                     MelonLogger.Msg("[OtogiTranslate] font-redirect-installed");
                 }
                 catch (Exception exception)
@@ -1352,15 +1433,15 @@ namespace OtogiTranslate
                     ? IntPtr.Zero
                     : Invoke(FindMethod(_objectGetClass(uri), "get_AbsoluteUri"), uri);
                 var requestUrl = ToManagedString(absoluteUri);
-                if (TranslationLogic.IsFontUrl(requestUrl))
+                if (TranslationLogic.IsFontUrl(requestUrl) &&
+                    !TranslationLogic.IsLocalFontUrl(requestUrl))
                 {
                     var replacement = _objectNew(_uriClass);
                     Invoke(
                         _uriConstructor,
                         replacement,
-                        ToIl2CppString(FontUrl));
+                        ToIl2CppString(TranslationLogic.LocalFontUrl));
                     uri = replacement;
-                    requestUrl = FontUrl;
                     if (Interlocked.Exchange(ref _fontRedirectLogged, 1) == 0)
                         MelonLogger.Msg("[OtogiTranslate] font-redirected");
                 }
@@ -1379,6 +1460,189 @@ namespace OtogiTranslate
                 argument3,
                 argument4,
                 methodInfo);
+        }
+
+        private static IntPtr SendHttpRequest(IntPtr request, IntPtr methodInfo)
+        {
+            try
+            {
+                if (request != IntPtr.Zero && IsLocalFontRequest(request))
+                {
+                    try
+                    {
+                        ServeLocalFont(request);
+                    }
+                    catch (Exception exception)
+                    {
+                        LogFontLocalError(exception);
+                        FailLocalFont(request);
+                    }
+                    return request;
+                }
+            }
+            catch (Exception exception)
+            {
+                LogFontLocalError(exception);
+            }
+            return _originalSendRequest(request, methodInfo);
+        }
+
+        private static void LogFontLocalError(Exception exception)
+        {
+            if (Interlocked.Exchange(ref _fontLocalErrorLogged, 1) == 0)
+                MelonLogger.Error(
+                    "[OtogiTranslate] font-local-error: " + exception.Message);
+        }
+
+        private static bool IsLocalFontRequest(IntPtr request)
+        {
+            var uri = Invoke(_httpRequestGetUri, request);
+            if (uri == IntPtr.Zero)
+                return false;
+            var host = ToManagedString(Invoke(_uriGetHost, uri));
+            return string.Equals(
+                host, "otogi-font.invalid", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void ServeLocalFont(IntPtr request)
+        {
+            var path = Path.Combine(MelonUtils.GetApplicationPath(), "Assets", "font");
+            var length = new FileInfo(path).Length;
+            if (length <= 0 || length > int.MaxValue)
+                throw new InvalidDataException("local font payload is empty");
+
+            var data = Invoke(_fileReadAllBytes, IntPtr.Zero, ToIl2CppString(path));
+            if (data == IntPtr.Zero)
+                throw new InvalidOperationException("File.ReadAllBytes returned null");
+            var stream = _objectNew(_memoryStreamClass);
+            Invoke(_memoryStreamCtor, stream);
+            var response = _objectNew(_httpResponseClass);
+            var boxedFalse = BoxInt32(0);
+            var boxedStatus = BoxInt32(200);
+            var boxedState = BoxInt32(HttpRequestFinished);
+            try
+            {
+                Invoke(
+                    _httpResponseCtor,
+                    response,
+                    request,
+                    stream,
+                    boxedFalse,
+                    boxedFalse);
+                SetReference(
+                    response,
+                    "set_Data",
+                    "<Data>k__BackingField",
+                    "System.Byte[]",
+                    data);
+                SetInt32(response, "set_StatusCode", "<StatusCode>k__BackingField", boxedStatus);
+                SetReference(
+                    request,
+                    "set_Response",
+                    "<Response>k__BackingField",
+                    "BestHTTP.HTTPResponse",
+                    response);
+                SetInt32(request, "set_State", "<State>k__BackingField", boxedState);
+            }
+            finally
+            {
+                FreeBox(boxedFalse);
+                FreeBox(boxedStatus);
+                FreeBox(boxedState);
+                Invoke(_streamDispose, stream);
+            }
+            Invoke(_httpRequestCallCallback, request);
+            MelonLogger.Msg(string.Format(
+                CultureInfo.InvariantCulture,
+                "[OtogiTranslate] font-local bytes={0}",
+                length));
+        }
+
+        private static void FailLocalFont(IntPtr request)
+        {
+            var boxedState = BoxInt32(HttpRequestError);
+            try
+            {
+                SetInt32(request, "set_State", "<State>k__BackingField", boxedState);
+                Invoke(_httpRequestCallCallback, request);
+            }
+            finally
+            {
+                FreeBox(boxedState);
+            }
+        }
+
+        private static IntPtr BoxInt32(int value)
+        {
+            var box = Marshal.AllocHGlobal(4);
+            Marshal.WriteInt32(box, value);
+            return box;
+        }
+
+        private static void FreeBox(IntPtr box)
+        {
+            if (box != IntPtr.Zero)
+                Marshal.FreeHGlobal(box);
+        }
+
+        private static void SetInt32(
+            IntPtr instance, string setter, string field, IntPtr value)
+        {
+            try
+            {
+                Invoke(
+                    FindMethod(_objectGetClass(instance), setter, 1, "System.Int32"),
+                    instance,
+                    value);
+            }
+            catch (MissingMethodException)
+            {
+                SetField(instance, field, value);
+            }
+        }
+
+        private static void SetReference(
+            IntPtr instance,
+            string setter,
+            string field,
+            string firstParameterType,
+            IntPtr value)
+        {
+            try
+            {
+                Invoke(
+                    FindMethod(
+                        _objectGetClass(instance), setter, 1, firstParameterType),
+                    instance,
+                    value);
+            }
+            catch (MissingMethodException)
+            {
+                var box = Marshal.AllocHGlobal(IntPtr.Size);
+                try
+                {
+                    Marshal.WriteIntPtr(box, value);
+                    SetField(instance, field, box);
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(box);
+                }
+            }
+        }
+
+        private static void SetField(IntPtr instance, string name, IntPtr value)
+        {
+            var klass = _objectGetClass(instance);
+            IntPtr field = IntPtr.Zero;
+            while (klass != IntPtr.Zero && field == IntPtr.Zero)
+            {
+                field = _classGetField(klass, name);
+                klass = _classGetParent(klass);
+            }
+            if (field == IntPtr.Zero)
+                throw new MissingFieldException(name);
+            _fieldSetValue(instance, field, value);
         }
 
         private static void ScanTmpText()

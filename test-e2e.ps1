@@ -135,6 +135,7 @@ function Assert-CleanLog([string]$Text) {
         "[OtogiTranslate] mosaic-error",
         "[OtogiTranslate] font-redirect-failed",
         "[OtogiTranslate] font-redirect-error",
+        "[OtogiTranslate] font-local-error",
         "[OtogiTranslate] response-error",
         "[OtogiTranslate] dictionary-prefetch-error",
         "[OtogiTranslate] dictionary-download-failed",
