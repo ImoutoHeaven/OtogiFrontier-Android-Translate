@@ -12,7 +12,8 @@ LemonLoader 安装包。目标包名为 `jp.co.dmm.dmmgames.kms.prototype`；编
 - 将 Unity 目标帧率固定为 60 FPS。
 - 将 Spine `SkeletonMosaic` 材质的 `_BlockSize` 设为 `0.001`。
 - 将游戏 `/Assets/font` 请求改写为 `http://otogi-font.invalid/Assets/font`，BestHTTP
-  发送钩子读取 APK 预置的 Noto Sans CJK SC AssetBundle 作为响应。
+  发送钩子读取 APK 预置的 Noto Sans CJK SC AssetBundle 作为响应。固定来源位于
+  `files/UserData/OtogiTranslate/font`，与游戏管理的 `files/Assets/font` 缓存分开保存。
 - `OtogiTranslate.dll` 同时提供角色剧情、成人与场景 JSON 解锁：HTTP 400/404
   时用 `UserData/OtogiCgUnlock` 缓存替换响应；缺文件时按 `OtogiCgUnlock.cfg` 的
   `Root` 下载（默认 GitHub raw）。
@@ -31,11 +32,15 @@ id 合并进 `/api/Episode/CharacterStory`。静止画、语音和 BGM 从官方
 - `OTOGI_ADB` 或 PATH 中的 `adb`
 - `ANDROID_SERIAL`，默认 `127.0.0.1:5555`
 - 可选 `OTOGI_INPUT_APK` 指向官方单体 APK
-- 支持 ARM64 native bridge 的 Android 模拟器
+- ARM64 Android 设备，或支持 ARM64 native bridge 的 Android 模拟器
 - 包名为 `jp.co.dmm.dmmgames.kms`、签名匹配项目内固定摘要且包含
   `lib/arm64-v8a/libil2cpp.so` 的 DMM 单体 APK
 
 ## 构建、安装和检查
+
+APK 的 `Application` 入口在 LemonLoader 加载前，通过 Android 的 `getExternalFilesDir`
+准备自身的 `il2cpp` 目录。安装后的初始化使用普通应用权限，独立于 ADB、`su` 和开发脚本；
+DMM 登录、网络访问与设备的 ARM64/Loader 相容性仍是运行前置条件。
 
 在模拟器的 DMM GAMES STORE 中更新官方版。首次构建运行：
 
@@ -185,7 +190,28 @@ pwsh -NoProfile -NonInteractive -File ./test-loader.ps1
 该测试安装 `out/` 中的 APK，核对设备上 `OtogiTranslate.dll` 和字体哈希，并要求
 LemonLoader assembly、剧情响应、60 FPS、马赛克、字体、词典传输、运行时驱动 hook 以及
 `[OtogiCgUnlock] installed` 完成初始化。测试刷新 Plugins 与字体；登录、LLM 配置、翻译缓存
-和官方包数据沿用设备现有文件。
+和官方包数据沿用设备现有文件。开发测试在 `su` 可用时使用它读取文件证据，其他环境使用
+普通 ADB shell；文件访问失败时明确报错。应用目录与 emulator 标记由 APK 自行初始化。
+
+### 干净安装与首次启动
+
+```powershell
+python ./e2e_first_launch.py out/Original.prototype-signed.apk jp.co.dmm.dmmgames.kms.prototype
+```
+
+前置：测试包名尚未安装。脚本仅安装、启动并观察日志，要求 APK 自行完成目录准备及插件
+初始化。此测试使用普通 ADB 命令，截图与筛选后的启动日志写入 `out/e2e-first-launch/`。
+已安装的包会明确报错，以保留其账号与数据。
+
+### 字体更新回归
+
+```powershell
+python ./e2e_font.py
+```
+
+前置：具有 `su` 的 1920×1080 模拟器、可自动登录的 DMM 测试账号，以及已安装的构建产物。
+测试冷启动游戏、删除游戏的字体缓存、进入资源下载，要求实际字体请求成功、固定来源哈希
+匹配。截图与 Loader 日志写入 `out/e2e-font/`；登录与翻译配置沿用设备现有文件。
 
 ### 角色剧情远程 E2E
 
@@ -196,6 +222,7 @@ python ./e2e_characters.py
 冷启动清空 `UserData/OtogiCgUnlock`，从 GitHub raw 拉取 `characters.json`，进入角色剧情页后
 `characters-merged monsters>=975 spirits>=149`，锁定条目出现 `originalStatus=400` 或 `404` 替换。
 截图写入 `out/e2e/`。前置：1920×1080 横屏、已登录测试账号、设备能访问 GitHub raw。
+需要以 `su` 访问应用目录时，设置环境变量 `OTOGI_ADB_ROOT=1`。
 
 ### 真实游戏 E2E
 
@@ -213,6 +240,8 @@ pwsh -NoProfile -NonInteractive -File ./test-e2e.ps1 `
   -ExpectedModel $env:OTOGI_LLM_MODEL
 ```
 
+需要以 `su` 访问应用目录时，向 `test-e2e.ps1` 添加 `-UseSu`。
+
 测试从冷启动进入剧情页面，远端获取 `MScenes/10001` 和 `MAdults/10001`，再将成人词典
 应用到 API 场景 `210011`。通过条件包括：
 
@@ -228,9 +257,13 @@ LLM 缓存，并在结束阶段恢复；成功以 `PASS real game E2E` 结束。
 
 ## 兼容边界
 
+随包 bootstrap 使用非递归目录创建复制 Mono 配置，APK 的 `Application` 入口提前准备
+其父目录。构建器为该入口追加独立 DEX，并保留原始 DEX；带自定义 `Application` 的输入
+会触发构建错误，供人工确认其初始化顺序。
+
 运行验证覆盖 `OtogiTranslate` 的 native IL2CPP hooks。LemonLoader 0.5.7 加载该游戏的
 `UnityEngine.CoreModule` support module 时会记录 `TypeLoadException`。Prototype manifest
-包含 `android:debuggable=true` 和 `MANAGE_EXTERNAL_STORAGE`，适用环境为专用测试设备。
+包含 `android:debuggable=true`，适用环境为个人使用及专用测试设备。
 
 ## 组件、数据与许可
 
