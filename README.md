@@ -161,6 +161,7 @@ TimeoutSeconds = 30
 RetryCount = 2
 RequestsPerSecond = 2
 MaxQueue = 128
+SceneTranslation = true
 
 [UI]
 ScanIntervalSeconds = 0.5
@@ -178,6 +179,24 @@ HTTP。`ApiKey` 以明文保存在应用专属目录。
 `RetryCount` 表示首次请求之外的重试次数，范围为 0–5。408、429、5xx 和传输错误使用
 退避；其他 4xx 暂停当前进程的 LLM 队列。图片、Sprite 和 Texture 中的文字沿用资源
 内容。
+
+### 剧情整段翻译
+
+`SceneTranslation = true` 时，剧情响应（`MScenes`、`MAdults`、`Mstory`）先经社群词典改写，
+仍含假名的台词（`Phrase` / `Serif`）按场景整段送往 LLM。请求按剧情顺序携带全部台词作为
+上下文：说话者以稳定代号（`MMonsterId`，或 rich scene 中 `IsTalking` 角色的 ID，否则为
+显示名）和显示名表示，旁白的代号为 `null`，场景标题一并附上；只有带 `id` 的行需要翻译。
+单个请求约含 8000 字符原文，更长的场景按行切分。整段请求优先于逐句请求，超时为
+`TimeoutSeconds` 的 4 倍（30–300 秒）。
+
+响应的 `version`、`scene`、条目数量与 `id` 顺序全部匹配时采纳；其中空白、与原文相同或
+保护标记不一致的条目单独转入逐句路径。结构不匹配或请求最终失败时，该请求的全部台词
+转入逐句路径，整个场景在本次进程内不再发起整段请求；同一场景的其他切分各自校验。
+请求进行中，扫描器暂缓这些台词的逐句请求；首次传输失败即解除暂缓。
+
+结果写入 `UserData/OtogiTranslate/llm-scenes/<类型>/<ID>.json`，按行位置记录原文与译文，
+同时进入逐句缓存，供首次播放中后续出现的台词直接使用。再次进入剧情时，原文仍一致的行在
+响应阶段直接改写，零请求；被拒绝的行记为 `null`，保持逐句路径。
 
 ## 验证
 
@@ -223,6 +242,20 @@ python ./e2e_characters.py
 `characters-merged monsters>=975 spirits>=149`，锁定条目出现 `originalStatus=400` 或 `404` 替换。
 截图写入 `out/e2e/`。前置：1920×1080 横屏、已登录测试账号、设备能访问 GitHub raw。
 需要以 `su` 访问应用目录时，设置环境变量 `OTOGI_ADB_ROOT=1`。
+
+### 剧情整段翻译 E2E
+
+```powershell
+$env:OTOGI_ADB = 'C:/path/to/adb.exe'
+python ./e2e_scene_llm.py
+```
+
+前置：具有 `su` 的 1920×1080 模拟器、已登录测试账号、已安装的构建产物。脚本在宿主
+`127.0.0.1:18765` 启动模拟 OpenAI 端点并通过 `adb reverse` 映射到设备，暂存并在结束时
+恢复设备的 LLM 配置、逐句缓存、场景缓存和场景 `10001` 的词典；空词典让全部台词进入整段
+路径。测试依次验证：首播发出一次带说话者上下文的整段请求且无重复逐句请求；重播零请求
+直接改写；结构错误与 HTTP 500 均转入逐句路径。截图与模拟端点请求记录写入
+`out/e2e-scene/`。
 
 ### 真实游戏 E2E
 

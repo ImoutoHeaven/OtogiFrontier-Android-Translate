@@ -59,12 +59,12 @@ RUN mkdir -p \
     && printf 'enabled\n' > /opt/lemon-payload/assets/copyToData/isEmulator.txt \
     && rm -rf /tmp/lemon /tmp/il2cpp /tmp/*.zip /tmp/installer.apk
 
-COPY plugin/OtogiTranslate.cs plugin/RuntimeTranslation.cs plugin/OtogiCgUnlock.cs /tmp/plugin/
+COPY plugin/OtogiTranslate.cs plugin/RuntimeTranslation.cs plugin/SceneTranslation.cs plugin/OtogiCgUnlock.cs /tmp/plugin/
 RUN mkdir -p /opt/plugin \
     && mcs -target:exe -define:SELF_TEST -langversion:7.2 \
         -out:/tmp/plugin/OtogiTranslate.SelfTest.exe \
         -r:/opt/lemon-payload/assets/melonloader/etc/managed/Newtonsoft.Json.dll \
-        /tmp/plugin/OtogiTranslate.cs /tmp/plugin/RuntimeTranslation.cs \
+        /tmp/plugin/OtogiTranslate.cs /tmp/plugin/RuntimeTranslation.cs /tmp/plugin/SceneTranslation.cs \
     && mcs -target:exe -define:SELF_TEST -langversion:7.2 \
         -out:/tmp/plugin/OtogiCgUnlock.SelfTest.exe \
         -r:/opt/lemon-payload/assets/melonloader/etc/managed/Newtonsoft.Json.dll \
@@ -76,7 +76,7 @@ RUN mkdir -p /opt/plugin \
         -out:/opt/plugin/OtogiTranslate.dll \
         -r:/opt/lemon-payload/assets/melonloader/etc/MelonLoader.dll \
         -r:/opt/lemon-payload/assets/melonloader/etc/managed/Newtonsoft.Json.dll \
-        /tmp/plugin/OtogiTranslate.cs /tmp/plugin/RuntimeTranslation.cs /tmp/plugin/OtogiCgUnlock.cs \
+        /tmp/plugin/OtogiTranslate.cs /tmp/plugin/RuntimeTranslation.cs /tmp/plugin/SceneTranslation.cs /tmp/plugin/OtogiCgUnlock.cs \
     && rm -rf /tmp/plugin
 
 COPY bootstrap/OtogiApplication.smali /opt/OtogiApplication.smali

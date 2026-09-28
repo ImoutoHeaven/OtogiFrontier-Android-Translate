@@ -160,8 +160,177 @@ namespace OtogiTranslate
                 RuntimeTranslator.HasSameProtectedTokens("あ\nい", "甲乙"))
                 throw new InvalidOperationException("translation self-check failed");
             CheckRuntimeQueue();
+            CheckSceneTranslation();
             Console.WriteLine("PASS translation self-check");
             return 0;
+        }
+
+        private static void Require(bool condition, string message)
+        {
+            if (!condition)
+                throw new InvalidOperationException("scene self-check failed: " + message);
+        }
+
+        private static string SceneResponse(string scene, params string[] texts)
+        {
+            var translations = new JArray();
+            for (var index = 0; index < texts.Length; index++)
+                translations.Add(new JObject(
+                    new JProperty("id", "t" + index.ToString(CultureInfo.InvariantCulture)),
+                    new JProperty("text", texts[index])));
+            var content = new JObject(
+                new JProperty("version", 1),
+                new JProperty("scene", scene),
+                new JProperty("translations", translations)).ToString(Formatting.None);
+            return new JObject(new JProperty("choices", new JArray(new JObject(
+                new JProperty("message", new JObject(
+                    new JProperty("content", content))))))).ToString(Formatting.None);
+        }
+
+        private static void CheckSceneTranslation()
+        {
+            const string scene =
+                "[{\"Title\":\"出会い\",\"MSceneDetails\":[" +
+                "{\"Name\":\"\",\"MMonsterId\":0,\"Phrase\":\"夜の道を歩く。\"}," +
+                "{\"Name\":\"シンデレラ\",\"MMonsterId\":10011,\"Phrase\":\"%user_nameさん、\\\\nこんばんは。\"}," +
+                "{\"Name\":\"？？？\",\"MMonsterId\":10021,\"Phrase\":\"……あ。\"}," +
+                "{\"Name\":\"シンデレラ\",\"MMonsterId\":10011,\"Phrase\":\"已经翻译。\"}]}," +
+                "{\"MRichSceneDetails\":[{\"Name\":\"ヘル\",\"Serif\":\"<b>はい</b>\"," +
+                "\"Characters\":[{\"MMonsterId\":0,\"IsTalking\":false}," +
+                "{\"MMonsterId\":21331,\"IsTalking\":true}]}]}]";
+            var document = SceneDocument.Parse(scene);
+            Require(document.Lines.Count == 5 && document.Title == "出会い", "extraction");
+            Require(document.Lines[0].Speaker == null && document.Lines[1].Speaker == "m10011" &&
+                document.Lines[4].Speaker == "m21331", "speaker keys");
+
+            var batches = SceneBatch.Create("MScenes", "1", document, new HashSet<int> { 0, 1, 2, 4 });
+            Require(batches.Count == 1 && batches[0].Targets.Count == 4, "batch targets");
+            var payload = JObject.Parse(batches[0].Payload);
+            var lines = (JArray)payload["lines"];
+            Require((string)payload["scene"] == "MScenes/1" && (string)payload["title"] == "出会い" &&
+                lines.Count == 5 && lines[0]["speaker"].Type == JTokenType.Null &&
+                (string)lines[1]["speaker"] == "s1" && (string)lines[3]["speaker"] == "s1" &&
+                (string)lines[2]["speaker"] == "s2" && (string)lines[2]["name"] == "？？？" &&
+                lines[3]["id"] == null && (string)lines[4]["id"] == "t3", "payload context and speakers");
+
+            string[] parsed;
+            var good = new[] { "走在夜路上。（ガタン）", "%user_name先生，\\n晚上好。", "……啊。", "<b>是</b>" };
+            var content = (string)JObject.Parse(SceneResponse("MScenes/1", good))
+                .SelectToken("choices[0].message.content");
+            Require(batches[0].TryParse("```json\n" + content + "\n```", out parsed) &&
+                parsed[1] == good[1] && parsed[3] == good[3], "fenced valid response");
+            Require(!batches[0].TryParse(content.Replace("MScenes/1", "MScenes/2"), out parsed), "scene mismatch");
+            Require(!batches[0].TryParse(content.Replace("\"t1\"", "\"t9\""), out parsed), "id order");
+            var shortContent = (string)JObject.Parse(SceneResponse("MScenes/1", good[0], good[1], good[2]))
+                .SelectToken("choices[0].message.content");
+            Require(!batches[0].TryParse(shortContent, out parsed), "entry count");
+            var broken = (string)JObject.Parse(SceneResponse("MScenes/1",
+                good[0], "晚上好。", good[2], good[3])).SelectToken("choices[0].message.content");
+            Require(batches[0].TryParse(broken, out parsed) && parsed[1] == null && parsed[0] == good[0],
+                "partial entry rejection");
+
+            var longScene = new JArray();
+            for (var index = 0; index < 40; index++)
+                longScene.Add(new JObject(new JProperty("Name", "ア"),
+                    new JProperty("Phrase", new string('あ', 500))));
+            var longDocument = SceneDocument.Parse(longScene.ToString());
+            var allLines = new HashSet<int>();
+            for (var index = 0; index < 40; index++)
+                allLines.Add(index);
+            var chunks = SceneBatch.Create("Mstory", "9", longDocument, allLines);
+            var covered = 0;
+            foreach (var chunk in chunks)
+            {
+                covered += chunk.Targets.Count;
+                Require(chunk.Payload.Length < SceneBatch.MaxSourceCharacters * 2 &&
+                    (string)JObject.Parse(chunk.Payload)["lines"][0]["id"] == "t0", "chunk shape");
+            }
+            Require(chunks.Count > 1 && covered == 40, "chunk coverage");
+
+            var directory = Path.Combine(
+                Path.GetTempPath(), "otogi-scene-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            try
+            {
+                var config = Path.Combine(directory, "OtogiTranslate.cfg");
+                File.WriteAllText(config,
+                    "[LLM]\nEnable=true\nEndpoint=https://example.test/v1/chat/completions\nModel=test\n",
+                    new UTF8Encoding(false));
+                const string rendered = "%user_nameさん、\nこんばんは。";
+                using (var translator = new RuntimeTranslator(directory, ignored => { }, ignored => { }))
+                {
+                    int applied;
+                    int requested;
+                    string queued;
+                    // A per-line rejection that predates the scene.
+                    translator.Observe("<b>はい</b>");
+                    Require(translator.TryTake(out queued), "early per-line request");
+                    translator.Accept(queued, "{\"choices\":[{\"message\":{\"content\":\"是\"}}]}");
+                    var output = translator.ApplyScene("MScenes", "1", scene, out applied, out requested);
+                    Require(ReferenceEquals(output, scene) && applied == 0 && requested == 4, "first apply");
+                    translator.ApplyScene("MScenes", "1", scene, out applied, out requested);
+                    Require(requested == 0, "pending scene is queued once");
+                    translator.Observe(rendered);
+                    translator.Observe("……あ。");
+                    Require(!translator.TryTake(out queued), "held lines wait for the scene");
+                    SceneBatch batch;
+                    Require(translator.TryTakeScene(out batch) && batch.Key == "MScenes/1", "scene queue");
+                    var request = JObject.Parse(Encoding.UTF8.GetString(translator.BuildSceneRequestBody(batch)));
+                    Require((string)request["messages"][1]["content"] == batch.Payload, "scene request body");
+                    // First transport failure releases the hold; the retry then succeeds.
+                    translator.ReleaseScene(batch);
+                    translator.Observe("夜の道を歩く。");
+                    translator.AcceptScene(batch, SceneResponse("MScenes/1",
+                        good[0], good[1], "……あ。", good[3]));
+                    Require(translator.Observe(rendered) == "%user_name先生，\n晚上好。" &&
+                        translator.Observe("<b>はい</b>") == good[3], "scene results reach the per-line cache");
+                    translator.Observe("……あ。");
+                    Require(translator.TryTake(out queued) && queued == "……あ。",
+                        "rejected entry falls back to the per-line path");
+                }
+                using (var translator = new RuntimeTranslator(directory, ignored => { }, ignored => { }))
+                {
+                    int applied;
+                    int requested;
+                    var output = translator.ApplyScene("MScenes", "1", scene, out applied, out requested);
+                    Require(applied == 3 && requested == 0 && output.Contains("走在夜路上") &&
+                        output.Contains("……あ。"), "stored scene applies without a request");
+                    string resent;
+                    translator.Observe(good[0]);
+                    Require(!translator.TryTake(out resent), "applied translations are not resent");
+                    var changed = scene.Replace("夜の道を歩く。", "朝の道を歩く。");
+                    translator.ApplyScene("MScenes", "1", changed, out applied, out requested);
+                    Require(applied == 2 && requested == 1, "changed line is requested again");
+                    SceneBatch batch;
+                    Require(translator.TryTakeScene(out batch), "changed scene queued");
+                    translator.AcceptScene(batch, SceneResponse("MScenes/1", "a", "b"));
+                    translator.ApplyScene("MScenes", "1", changed, out applied, out requested);
+                    Require(requested == 0, "failed scene is not retried in-process");
+                    string queued;
+                    translator.Observe("朝の道を歩く。");
+                    Require(translator.TryTake(out queued), "failed scene falls back to the per-line path");
+
+                    translator.ApplyScene("MScenes", "2", scene, out applied, out requested);
+                    Require(translator.TryTakeScene(out batch), "retry scene queued");
+                    translator.ReleaseScene(batch);
+                    translator.Observe("……あ。");
+                    Require(translator.TryTake(out queued), "released scene lines use the per-line path");
+                }
+                File.WriteAllText(config, "[LLM]\nEnable=true\nSceneTranslation=false\n" +
+                    "Endpoint=https://example.test/v1/chat/completions\nModel=test\n",
+                    new UTF8Encoding(false));
+                using (var translator = new RuntimeTranslator(directory, ignored => { }, ignored => { }))
+                {
+                    int applied;
+                    int requested;
+                    Require(ReferenceEquals(translator.ApplyScene("MScenes", "1", scene,
+                        out applied, out requested), scene) && requested == 0, "scene switch");
+                }
+            }
+            finally
+            {
+                Directory.Delete(directory, true);
+            }
         }
 
         private static void CheckRuntimeQueue()
@@ -481,6 +650,9 @@ namespace OtogiTranslate
         private static int _activeAttempt;
         private static string _retrySource;
         private static int _retryAttempt;
+        private static SceneBatch _activeScene;
+        private static int _sceneErrorLogged;
+        private static SceneBatch _retryScene;
         private static int _llmRequestLogged;
         private static bool _llmCircuitOpen;
 
@@ -757,9 +929,10 @@ namespace OtogiTranslate
                         message => MelonLogger.Msg(message),
                         message => MelonLogger.Warning(message));
                     MelonLogger.Msg(string.Format(
-                        "[OtogiTranslate] config-loaded path={0} llm={1}",
+                        "[OtogiTranslate] config-loaded path={0} llm={1} scene={2}",
                         _runtimeTranslator.ConfigPath,
-                        _runtimeTranslator.Config.Enable ? "enabled" : "disabled"));
+                        _runtimeTranslator.Config.Enable ? "enabled" : "disabled",
+                        _runtimeTranslator.Config.SceneTranslation ? "enabled" : "disabled"));
 
                     var webAssembly = assemblyOpen(
                         domainGet(), "UnityEngine.UnityWebRequestModule");
@@ -1119,31 +1292,41 @@ namespace OtogiTranslate
             if (now < _nextLlmRequest)
                 return;
 
-            string source;
-            int attempt;
-            if (_retrySource != null)
+            string source = null;
+            SceneBatch scene = null;
+            int attempt = 1;
+            if (_retryScene != null || _retrySource != null)
             {
                 source = _retrySource;
+                scene = _retryScene;
                 attempt = _retryAttempt;
                 _retrySource = null;
+                _retryScene = null;
                 _retryAttempt = 0;
             }
-            else
+            else if (!_runtimeTranslator.TryTakeScene(out scene) &&
+                !_runtimeTranslator.TryTake(out source))
             {
-                if (!_runtimeTranslator.TryTake(out source))
-                    return;
-                attempt = 1;
+                return;
             }
-            StartLlmRequest(source, attempt);
+            StartLlmRequest(source, scene, attempt);
         }
 
-        private static void StartLlmRequest(string source, int attempt)
+        private static void StartLlmRequest(string source, SceneBatch scene, int attempt)
         {
             _activeSource = source;
+            _activeScene = scene;
             _activeAttempt = attempt;
             try
             {
-                var payload = _runtimeTranslator.BuildRequestBody(source);
+                var payload = scene != null
+                    ? _runtimeTranslator.BuildSceneRequestBody(scene)
+                    : _runtimeTranslator.BuildRequestBody(source);
+                if (scene != null)
+                    MelonLogger.Msg(string.Format(
+                        CultureInfo.InvariantCulture,
+                        "[OtogiTranslate] scene-llm-request-started scene={0} lines={1} attempt={2}",
+                        scene.Key, scene.Targets.Count, attempt));
                 var bytes = _arrayNew(_byteClass, new UIntPtr((uint)payload.Length));
                 if (bytes == IntPtr.Zero)
                     throw new InvalidOperationException("Could not allocate request body");
@@ -1206,8 +1389,10 @@ namespace OtogiTranslate
             }
 
             var now = Stopwatch.GetTimestamp();
-            if (now - _activeRequestStarted >
-                (long)_runtimeTranslator.Config.TimeoutSeconds * Stopwatch.Frequency)
+            var timeoutSeconds = _activeScene != null
+                ? _runtimeTranslator.SceneTimeoutSeconds
+                : _runtimeTranslator.Config.TimeoutSeconds;
+            if (now - _activeRequestStarted > (long)timeoutSeconds * Stopwatch.Frequency)
             {
                 FailActiveRequest("timeout");
                 return;
@@ -1230,8 +1415,12 @@ namespace OtogiTranslate
                 var download = Invoke(_webRequestDownloadHandler, request);
                 var json = ToManagedString(Invoke(_downloadHandlerText, download));
                 var source = _activeSource;
+                var scene = _activeScene;
                 ReleaseActiveRequest(false);
-                _runtimeTranslator.Accept(source, json);
+                if (scene != null)
+                    _runtimeTranslator.AcceptScene(scene, json);
+                else
+                    _runtimeTranslator.Accept(source, json);
                 DelayNextRequest(1000 / _runtimeTranslator.Config.RequestsPerSecond);
             }
             catch (Exception exception)
@@ -1243,19 +1432,27 @@ namespace OtogiTranslate
         private static void FailActiveRequest(string reason)
         {
             var source = _activeSource;
+            var scene = _activeScene;
             var attempt = _activeAttempt;
             ReleaseActiveRequest(true);
             var retryable = IsRetryableRequestFailure(reason);
-            if (_runtimeTranslator != null && source != null && retryable &&
+            // The first scene failure hands its lines to the per-line path; retries still
+            // fill the scene cache if they succeed.
+            if (_runtimeTranslator != null && scene != null)
+                _runtimeTranslator.ReleaseScene(scene);
+            if (_runtimeTranslator != null && (source != null || scene != null) && retryable &&
                 attempt <= _runtimeTranslator.Config.RetryCount)
             {
                 _retrySource = source;
+                _retryScene = scene;
                 _retryAttempt = attempt + 1;
                 DelayNextRequest(Math.Min(30000, 1000 << Math.Min(attempt - 1, 4)));
                 return;
             }
             if (_runtimeTranslator != null && source != null)
                 _runtimeTranslator.Fail(source, reason);
+            if (_runtimeTranslator != null && scene != null)
+                _runtimeTranslator.FailScene(scene, reason);
             if (_runtimeTranslator == null)
                 return;
             if (IsPermanentLlmFailure(reason))
@@ -1296,6 +1493,7 @@ namespace OtogiTranslate
             _activeRequestHandle = 0;
             _activeRequestStarted = 0;
             _activeSource = null;
+            _activeScene = null;
             _activeAttempt = 0;
             if (handle == 0)
                 return;
@@ -1732,6 +1930,8 @@ namespace OtogiTranslate
                 if (!TryGetTranslationKey(responseUrl, out type, out id))
                     return result;
 
+                // The community dictionary wins; the scene LLM path only fills what it left.
+                var working = originalJson;
                 var dictionaryId = type == "MAdults"
                     ? GetAdultDictionaryId(id)
                     : id;
@@ -1743,28 +1943,53 @@ namespace OtogiTranslate
                         MelonLogger.Warning(
                             "[OtogiTranslate] adult-dictionary-mapping-missing id=" + id);
                     }
-                    return result;
                 }
-                var dictionary = GetDictionary(type, dictionaryId);
-                if (dictionary == null)
-                    return result;
-
-                int replacements;
-                var translated = TranslationLogic.TranslateJson(
-                    originalJson, dictionary, out replacements);
-                if (replacements == 0)
-                    return result;
-
-                MelonLogger.Msg(string.Format(
-                    "[OtogiTranslate] translated type={0} id={1} dictionary={2} replacements={3}",
-                    type, id, dictionaryId, replacements));
-                return ToIl2CppString(translated);
+                var dictionary = dictionaryId == null ? null : GetDictionary(type, dictionaryId);
+                if (dictionary != null)
+                {
+                    int replacements;
+                    working = TranslationLogic.TranslateJson(
+                        originalJson, dictionary, out replacements);
+                    if (replacements != 0)
+                        MelonLogger.Msg(string.Format(
+                            "[OtogiTranslate] translated type={0} id={1} dictionary={2} replacements={3}",
+                            type, id, dictionaryId, replacements));
+                }
+                working = ApplySceneTranslation(type, id, working);
+                return ReferenceEquals(working, originalJson)
+                    ? result
+                    : ToIl2CppString(working);
             }
             catch (Exception exception)
             {
                 if (Interlocked.Exchange(ref _detourErrorLogged, 1) == 0)
                     MelonLogger.Error("[OtogiTranslate] response-error: " + exception.Message);
                 return result;
+            }
+        }
+
+        private static string ApplySceneTranslation(string type, string id, string json)
+        {
+            var translator = _runtimeTranslator;
+            if (translator == null)
+                return json;
+            try
+            {
+                int applied;
+                int requested;
+                var translated = translator.ApplyScene(type, id, json, out applied, out requested);
+                if (applied != 0 || requested != 0)
+                    MelonLogger.Msg(string.Format(
+                        CultureInfo.InvariantCulture,
+                        "[OtogiTranslate] scene-llm type={0} id={1} applied={2} requested={3}",
+                        type, id, applied, requested));
+                return translated;
+            }
+            catch (Exception exception)
+            {
+                if (Interlocked.Exchange(ref _sceneErrorLogged, 1) == 0)
+                    MelonLogger.Error("[OtogiTranslate] scene-llm-error: " + exception.Message);
+                return json;
             }
         }
 
