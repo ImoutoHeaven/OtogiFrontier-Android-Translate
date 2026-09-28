@@ -1506,7 +1506,8 @@ namespace OtogiTranslate
 
         private static void ServeLocalFont(IntPtr request)
         {
-            var path = Path.Combine(MelonUtils.GetApplicationPath(), "Assets", "font");
+            var path = Path.Combine(
+                MelonUtils.GetApplicationPath(), "UserData", "OtogiTranslate", "font");
             var length = new FileInfo(path).Length;
             if (length <= 0 || length > int.MaxValue)
                 throw new InvalidDataException("local font payload is empty");

@@ -7,7 +7,8 @@ param(
     [string]$ExpectedEndpoint,
     [Parameter(Mandatory)]
     [string]$ExpectedModel,
-    [int]$TimeoutSeconds = 180
+    [int]$TimeoutSeconds = 180,
+    [switch]$UseSu
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,9 +32,10 @@ $run = Get-Date -Format "yyyyMMdd-HHmmss"
 $evidence = Join-Path $PSScriptRoot "e2e/$run"
 New-Item -ItemType Directory -Force -Path $evidence | Out-Null
 
-function Invoke-AdbShell([string]$Command) {
+function Invoke-AdbShell([string]$Command, [bool]$Check = $true) {
+    if ($UseSu) { $Command = "su -c '" + $Command.Replace("'", "'\''") + "'" }
     $output = & $adb -s $Serial shell $Command
-    if ($LASTEXITCODE -ne 0) { throw "adb shell failed" }
+    if ($Check -and $LASTEXITCODE -ne 0) { throw "adb shell failed" }
     return ($output -join "`n")
 }
 
@@ -63,7 +65,7 @@ function Read-IniSection([string]$Text, [string]$Name) {
 }
 
 function Read-LoaderLog {
-    return ((& $adb -s $Serial shell "cat '$log'" 2>$null) -join "`n")
+    return (Invoke-AdbShell "cat '$log'" -Check:$false 2>$null)
 }
 
 function Wait-LoaderLog([string[]]$Needles, [int]$Seconds = $TimeoutSeconds) {
@@ -268,7 +270,7 @@ try {
     Start-Sleep -Seconds 3
     Save-Screenshot "translated-adult"
 
-    $runtimeFont = ((Invoke-AdbShell "sha256sum '$files/Assets/font'") -split "\s+")[0].ToLowerInvariant()
+    $runtimeFont = ((Invoke-AdbShell "sha256sum '$files/UserData/OtogiTranslate/font'") -split "\s+")[0].ToLowerInvariant()
     if ($runtimeFont -ne $fontSha256) {
         throw "Replacement font mismatch: $runtimeFont"
     }
@@ -276,9 +278,7 @@ try {
         throw "Game process exited during E2E"
     }
 
-    Invoke-AdbCommand -Arguments @(
-        "pull", $log, (Join-Path $evidence "Latest.log")
-    ) | Out-Null
+    Set-Content -LiteralPath (Join-Path $evidence "Latest.log") -Encoding utf8 -Value (Invoke-AdbShell "cat '$log'")
     $passed = $true
 }
 finally {

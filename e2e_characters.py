@@ -2,6 +2,7 @@
 """Device E2E: empty cache, GitHub fetch, character-story merge, unowned 400 substitute."""
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -9,7 +10,7 @@ import time
 from pathlib import Path
 
 ADB = os.environ.get("OTOGI_ADB") or shutil.which("adb")
-if not ADB:
+if not ADB and sys.argv[1:] != ["--self-test"]:
     raise SystemExit("adb not found; set OTOGI_ADB or put adb on PATH")
 SERIAL = os.environ.get("ANDROID_SERIAL", "127.0.0.1:5555")
 PKG = "jp.co.dmm.dmmgames.kms.prototype"
@@ -32,7 +33,26 @@ def adb(*args, check=True):
 
 
 def shell(command, check=True):
+    if os.environ.get("OTOGI_ADB_ROOT") == "1":
+        command = "su -c " + shlex.quote(command)
     return adb("shell", command, check=check)
+
+
+def self_test():
+    from unittest.mock import patch
+
+    commands = ["", "cat '/sdcard/app files/Latest.log'", "printf '%s' \"a'b;$HOME\"\ntrue"]
+    for root in ("", "0", "1"):
+        with patch.dict(os.environ, OTOGI_ADB_ROOT=root), patch(__name__ + ".adb") as run:
+            for command in commands:
+                shell(command, check=False)
+                args, kwargs = run.call_args
+                assert args[0] == "shell" and kwargs == {"check": False}
+                if root == "1":
+                    assert shlex.split(args[1]) == ["su", "-c", command]
+                else:
+                    assert args[1] == command
+    print("PASS shell root opt-in and quoting (no device commands)")
 
 
 def screenshot(name):
@@ -74,6 +94,7 @@ def boot_cold_cache():
     shell(f"am force-stop {PKG}")
     shell(f"rm -rf {CACHE}")
     shell(f"rm -f {LOG}")
+    shell("logcat -c")
     shell(f"monkey -p {PKG} -c android.intent.category.LAUNCHER 1")
     wait_log("[OtogiCgUnlock] installed", 60)
     screenshot("00-boot")
@@ -87,6 +108,7 @@ def open_character_story():
         if "characters-merged" in log:
             break
         tap(960, 540, 4)
+        tap(1110, 750, 4)  # Accept the resource-update confirmation when present.
         screenshot("02-after-tap")
         tap(1690, 350, 6)
         screenshot("03-story-tap")
@@ -116,6 +138,11 @@ def open_unowned_row():
     tap(1700, 220, 8)
     screenshot("05-unowned")
     text = loader_log()
+    pid = shell(f"pidof {PKG}").strip()
+    errors = shell(f"logcat -d --pid={pid} -v brief Unity:E '*:S'")
+    (EVIDENCE / "scene-errors.txt").write_text(errors, encoding="utf-8")
+    if re.search(r"JsonSerializationException|ArgumentNullException|NullReferenceException", errors):
+        raise RuntimeError("game scene deserialization/runtime exception; see scene-errors.txt")
     if "hook-failed" in text or "response-error" in text:
         raise RuntimeError("plugin error in log")
     if re.search(
@@ -138,7 +165,10 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        if sys.argv[1:] == ["--self-test"]:
+            self_test()
+        else:
+            main()
     except Exception as exc:
         print("FAIL", exc)
         sys.exit(1)

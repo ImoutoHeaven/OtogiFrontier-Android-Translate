@@ -79,7 +79,10 @@ RUN mkdir -p /opt/plugin \
         /tmp/plugin/OtogiTranslate.cs /tmp/plugin/RuntimeTranslation.cs /tmp/plugin/OtogiCgUnlock.cs \
     && rm -rf /tmp/plugin
 
+COPY bootstrap/OtogiApplication.smali /opt/OtogiApplication.smali
 COPY patch-sign.sh /usr/local/bin/patch-sign
 RUN chmod 0755 /usr/local/bin/patch-sign
+
+ENV LANG=C.UTF-8
 
 ENTRYPOINT ["/usr/local/bin/patch-sign"]

@@ -26,6 +26,7 @@ KS_PASS=${KS_PASS:-android}
 KEY_PASS=${KEY_PASS:-$KS_PASS}
 export KS_PASS KEY_PASS
 
+[ -n "$package_name" ] || die "PACKAGE_NAME is required for bootstrap initialization"
 [ -f "$input_apk" ] || die "input APK not found: $input_apk"
 [ "$(basename "$output_name")" = "$output_name" ] || die "OUTPUT_APK must be a filename"
 mkdir -p "$output_dir" "$(dirname "$keystore")"
@@ -75,8 +76,18 @@ if [ -n "$package_name" ]; then
     grep -Fq "package=\"$input_package\"" "$manifest" \
         || die "decoded manifest package does not match aapt"
     sed -i "s/package=\"$input_package\"/package=\"$package_name\"/" "$manifest"
-    sed -i '/<supports-screens/i\    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>' "$manifest"
-    sed -i 's/<application /<application android:debuggable="true" android:requestLegacyExternalStorage="true" /' "$manifest"
+    if grep -Eq '<application[^>]*android:name=' "$manifest"; then
+        die "input has a custom Application; bootstrap integration requires review"
+    fi
+    sed -i 's/<application /<application android:name="org.otogi.patcher.OtogiApplication" android:debuggable="true" /' "$manifest"
+    # Preserve the original DEX files; compile the initializer into a separate DEX.
+    dex_index=2
+    while [ -f "$decoded_dir/classes$dex_index.dex" ]; do
+        dex_index=$((dex_index + 1))
+    done
+    bootstrap_dir="$decoded_dir/smali_classes$dex_index/org/otogi/patcher"
+    mkdir -p "$bootstrap_dir"
+    cp /opt/OtogiApplication.smali "$bootstrap_dir/"
     java -jar /usr/local/lib/apktool.jar b -o "$renamed_apk" "$decoded_dir" >/dev/null
     unzip -tqq "$renamed_apk" >/dev/null || die "renamed APK is invalid"
     compiled_package=$(aapt dump badging "$renamed_apk" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
@@ -114,6 +125,12 @@ rm "$font_gzip"
 [ "$(base64 -d < "$font_md5_file" | od -An -tx1 | tr -d ' \n')" \
     = "$(md5sum "$font_file" | awk '{print $1}')" ] \
     || die "replacement font MD5 sidecar is invalid"
+
+# Keep the source outside the game's disposable Assets cache.
+font_source_dir="$payload_dir/assets/copyToData/UserData/OtogiTranslate"
+mkdir -p "$font_source_dir"
+mv "$font_file" "$font_source_dir/font"
+rm "$font_md5_file"
 
 il2cpp_entry=lib/arm64-v8a/libil2cpp.so
 unzip -Z1 "$input_apk" | grep -Fxq "$il2cpp_entry" \

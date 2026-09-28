@@ -142,6 +142,27 @@ namespace OtogiCgUnlock
                 : SceneResponseAction.Original;
         }
 
+        internal static string NormalizeSceneResponse(string folder, string json)
+        {
+            if (folder != "scenes")
+                return json;
+            var scenes = JArray.Parse(json);
+            var changed = false;
+            foreach (var token in scenes)
+            {
+                var scene = token as JObject;
+                if (scene == null || (bool?)scene["UseRichScene"] != false)
+                    continue;
+                var richDetails = scene["MRichSceneDetails"];
+                if (richDetails != null && richDetails.Type == JTokenType.Null)
+                {
+                    scene["MRichSceneDetails"] = new JArray();
+                    changed = true;
+                }
+            }
+            return changed ? scenes.ToString(Newtonsoft.Json.Formatting.None) : json;
+        }
+
         internal static string[] ExtractPrefetchPaths(string json)
         {
             var result = new List<string>();
@@ -284,6 +305,26 @@ namespace OtogiCgUnlock
                 Array.IndexOf(paths, "scenes/10001.json") < 0 ||
                 Array.IndexOf(paths, "scenes/10002.json") < 0)
                 throw new InvalidOperationException("prefetch extraction self-check failed");
+
+            const string ordinaryScene =
+                "[{\"UseRichScene\":false,\"MRichSceneDetails\":null," +
+                "\"MSceneDetails\":[{\"Phrase\":\"hello\",\"Effect\":null}],\"MQuestId\":null}]";
+            var normalized = JArray.Parse(UnlockLogic.NormalizeSceneResponse("scenes", ordinaryScene));
+            var expected = JArray.Parse(ordinaryScene);
+            expected[0]["MRichSceneDetails"] = new JArray();
+            if (!JToken.DeepEquals(normalized, expected))
+                throw new InvalidOperationException("ordinary scene null rich details self-check failed");
+            foreach (var useRich in new[] { "true", "false" })
+            {
+                var richScene = "[{\"UseRichScene\":" + useRich +
+                    ",\"MRichSceneDetails\":[{\"Id\":123,\"Text\":\"keep\"}]}]";
+                if (UnlockLogic.NormalizeSceneResponse("scenes", richScene) != richScene)
+                    throw new InvalidOperationException("rich details preservation self-check failed");
+            }
+            if (UnlockLogic.NormalizeSceneResponse("scenes", expected.ToString()) != expected.ToString() ||
+                UnlockLogic.NormalizeSceneResponse("adults", ordinaryScene) != ordinaryScene ||
+                UnlockLogic.NormalizeSceneResponse("episodes", episodeJson) != episodeJson)
+                throw new InvalidOperationException("unchanged scene response self-check failed");
 
             var directory = Path.Combine(
                 Path.GetTempPath(), "otogi-cgunlock-" + Guid.NewGuid().ToString("N"));
@@ -769,7 +810,10 @@ namespace OtogiCgUnlock
             if (!File.Exists(path))
                 return false;
             json = File.ReadAllText(path);
-            return !string.IsNullOrEmpty(json);
+            if (string.IsNullOrEmpty(json))
+                return false;
+            json = UnlockLogic.NormalizeSceneResponse(folder, json);
+            return true;
         }
 
         private static void HandleSceneBody(string url, string body, int originalStatus)
